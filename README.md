@@ -69,7 +69,7 @@ and platform accessibility/security rehearsals remain release work. The
 
 Prerequisites:
 
-- Node.js 22 or newer and pnpm 11
+- Node.js 22.13+ or 24+ and pnpm 11
 - Rust 1.95 or newer
 - The [Tauri 2 system prerequisites](https://v2.tauri.app/start/prerequisites/)
   for the host platform

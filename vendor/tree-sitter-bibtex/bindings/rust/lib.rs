@@ -24,7 +24,7 @@ unsafe extern "C" {
 /// The tree-sitter [`LanguageFn`] for this grammar.
 ///
 /// The generated parser is vendored unchanged. This binding uses the stable
-/// `tree-sitter-language` ABI so Setwright can load it with tree-sitter 0.25.
+/// `tree-sitter-language` ABI so Setwright can load it with tree-sitter 0.26.
 pub const LANGUAGE: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_bibtex) };
 
 /// The content of the [`node-types.json`][] file for this grammar.

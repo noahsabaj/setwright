@@ -7,7 +7,7 @@
 The generated grammar, queries, parser C source, and Tree-sitter header are
 copied byte-for-byte from the crates.io package. The Rust binding alone is
 adapted to expose `tree_sitter_language::LanguageFn`, the ABI used by
-tree-sitter 0.25, and to use Rust 2024's `unsafe extern` syntax. Setwright's
+tree-sitter 0.26, and to use Rust 2024's `unsafe extern` syntax. Setwright's
 top-level build script compiles `src/parser.c`; the vendored crate is not added
 as a separate Cargo dependency.
 
