@@ -2373,9 +2373,9 @@ fn imported_project_key(root: &Path) -> String {
 /// digest of the already-canonical project root; it is never written into the
 /// paper unless the user explicitly adopts Setwright project metadata.
 fn stable_imported_project_id(root: &Path) -> ProjectId {
-    let mut identity = root.to_string_lossy().replace('\\', "/");
+    let identity = root.to_string_lossy().replace('\\', "/");
     #[cfg(windows)]
-    identity.make_ascii_lowercase();
+    let identity = identity.to_ascii_lowercase();
 
     let mut hasher = Sha256::new();
     hasher.update(b"setwright-imported-project-v1\0");
