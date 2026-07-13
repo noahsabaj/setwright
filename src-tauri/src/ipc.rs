@@ -2345,8 +2345,15 @@ fn validate_folder_name(folder_name: &str) -> AppResult<()> {
 
 fn validate_relative_source_path(path: &str) -> AppResult<PathBuf> {
     let relative = Path::new(path);
+    // IPC paths use portable `/` separators. Relying only on the host's
+    // `Path::components` would treat Windows drive, rooted, and parent paths
+    // as ordinary file names on Unix hosts.
+    let has_non_portable_windows_syntax = path.contains(['\\', ':']);
+    let has_portable_parent = path.split('/').any(|component| component == "..");
     if relative.as_os_str().is_empty()
         || relative.is_absolute()
+        || has_non_portable_windows_syntax
+        || has_portable_parent
         || relative.components().any(|component| {
             matches!(
                 component,
@@ -2766,6 +2773,10 @@ mod tests {
         );
         assert!(validate_relative_source_path("../outside.tex").is_err());
         assert!(validate_relative_source_path("C:\\outside.tex").is_err());
+        assert!(validate_relative_source_path("C:/outside.tex").is_err());
+        assert!(validate_relative_source_path("..\\outside.tex").is_err());
+        assert!(validate_relative_source_path("\\outside.tex").is_err());
+        assert!(validate_relative_source_path("main.tex:stream").is_err());
     }
 
     #[test]
