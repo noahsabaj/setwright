@@ -1,0 +1,365 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:setwright:schema:arxiv-preflight-report:v1",
+  "title": "ArxivPreflightReportV1",
+  "description": "Evidence for one frozen arXiv candidate archive; not an arXiv acceptance decision.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "reportId",
+    "generatedAt",
+    "source",
+    "runtime",
+    "policy",
+    "findings",
+    "includedFiles",
+    "excludedFiles",
+    "cleanBuild",
+    "userApproval",
+    "ready"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "reportId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "source": {
+      "$ref": "#/$defs/source"
+    },
+    "runtime": {
+      "$ref": "#/$defs/runtime"
+    },
+    "policy": {
+      "$ref": "#/$defs/policy"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/finding"
+      }
+    },
+    "includedFiles": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/includedFile"
+      }
+    },
+    "excludedFiles": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/excludedFile"
+      }
+    },
+    "cleanBuild": {
+      "$ref": "#/$defs/cleanBuild"
+    },
+    "userApproval": {
+      "$ref": "#/$defs/userApproval"
+    },
+    "ready": {
+      "type": "boolean"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "ready": {
+            "const": true
+          }
+        },
+        "required": [
+          "ready"
+        ]
+      },
+      "then": {
+        "properties": {
+          "cleanBuild": {
+            "type": "object",
+            "properties": {
+              "succeeded": {
+                "const": true
+              },
+              "pdfSha256": {
+                "$ref": "#/$defs/sha256"
+              }
+            }
+          },
+          "userApproval": {
+            "type": "object",
+            "properties": {
+              "approved": {
+                "const": true
+              },
+              "approvedAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "approvedPdfSha256": {
+                "$ref": "#/$defs/sha256"
+              }
+            }
+          },
+          "findings": {
+            "not": {
+              "type": "array",
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "severity": {
+                    "const": "blocker"
+                  }
+                },
+                "required": [
+                  "severity"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^\\u0000]+$"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "projectId",
+        "revision",
+        "mainFile",
+        "sourceSha256"
+      ],
+      "properties": {
+        "projectId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mainFile": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "sourceSha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profileId",
+        "manifestSha256",
+        "engine"
+      ],
+      "properties": {
+        "profileId": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+        },
+        "manifestSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "engine": {
+          "enum": [
+            "pdflatex",
+            "xelatex"
+          ]
+        }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policyId",
+        "submissionToolsCommit"
+      ],
+      "properties": {
+        "policyId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "submissionToolsCommit": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{40}$"
+        }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "severity",
+        "code",
+        "message"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "severity": {
+          "enum": [
+            "blocker",
+            "warning",
+            "info"
+          ]
+        },
+        "code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]{1,63}$"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        },
+        "path": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "includedFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sizeBytes",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "excludedFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "reason"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      }
+    },
+    "cleanBuild": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "succeeded",
+        "startedAt",
+        "finishedAt",
+        "pdfSha256",
+        "pageCount"
+      ],
+      "properties": {
+        "succeeded": {
+          "type": "boolean"
+        },
+        "startedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "finishedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "pdfSha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pageCount": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        }
+      }
+    },
+    "userApproval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "approved",
+        "approvedAt",
+        "approvedPdfSha256"
+      ],
+      "properties": {
+        "approved": {
+          "type": "boolean"
+        },
+        "approvedAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "approvedPdfSha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

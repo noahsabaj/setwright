@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "reportId": "339a0481-a21e-4afb-bc62-733ba82a05fd",
+  "generatedAt": "2026-07-13T18:15:00Z",
+  "source": {
+    "projectId": "0f83e083-4272-4b0f-95a0-4cb4f57bd622",
+    "revision": 42,
+    "mainFile": "main.tex",
+    "sourceSha256": "6666666666666666666666666666666666666666666666666666666666666666"
+  },
+  "runtime": {
+    "profileId": "texlive-2025-2025-08-03",
+    "manifestSha256": "7777777777777777777777777777777777777777777777777777777777777777",
+    "engine": "pdflatex"
+  },
+  "policy": {
+    "policyId": "arxiv-2026-07-example",
+    "submissionToolsCommit": null
+  },
+  "findings": [
+    {
+      "id": "a234e295-6504-4732-8f71-d928a69c74a3",
+      "severity": "blocker",
+      "code": "ORACLE_UNPINNED",
+      "message": "The example intentionally has no reviewed submission-tools commit."
+    }
+  ],
+  "includedFiles": [
+    {
+      "path": "main.tex",
+      "sizeBytes": 2400,
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  ],
+  "excludedFiles": [
+    {
+      "path": "paper-settings.json",
+      "reason": "Setwright metadata is not paper source."
+    }
+  ],
+  "cleanBuild": {
+    "succeeded": false,
+    "startedAt": "2026-07-13T18:10:00Z",
+    "finishedAt": "2026-07-13T18:10:01Z",
+    "pdfSha256": null,
+    "pageCount": null
+  },
+  "userApproval": {
+    "approved": false,
+    "approvedAt": null,
+    "approvedPdfSha256": null
+  },
+  "ready": false
+}

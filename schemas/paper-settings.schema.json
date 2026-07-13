@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:setwright:schema:paper-settings:v1",
+  "title": "PaperSettingsV1",
+  "description": "Settings written only for a Setwright-created or explicitly adopted paper project.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "projectId",
+    "mainFile",
+    "templateId",
+    "runtimeId",
+    "engine"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "projectId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "mainFile": {
+      "$ref": "#/$defs/texPath"
+    },
+    "templateId": {
+      "enum": [
+        "generic-article",
+        "acm-acmart",
+        "ieee-ieeetran"
+      ]
+    },
+    "runtimeId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+    },
+    "engine": {
+      "enum": [
+        "pdflatex",
+        "xelatex"
+      ]
+    }
+  },
+  "$defs": {
+    "texPath": {
+      "type": "string",
+      "minLength": 5,
+      "maxLength": 1024,
+      "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^\\u0000]+\\.tex$"
+    }
+  }
+}

@@ -1,0 +1,38 @@
+\section{Method}
+\label{sec:method}
+
+\begin{definition}[Validated edit]
+A validated edit is a tuple
+$e=(f,b_0,b_1,r,h)$ containing a file identifier, half-open byte interval,
+replacement text, and the expected hash of the replaced bytes.
+\end{definition}
+
+Let $S_f$ be the authoritative bytes for file $f$. An edit is eligible exactly
+when its interval is valid and its precondition matches:
+\begin{equation}
+  \label{eq:eligibility}
+  0 \le b_0 \le b_1 \le \lvert S_f \rvert
+  \quad\land\quad
+  H(S_f[b_0:b_1]) = h.
+\end{equation}
+
+\begin{theorem}[Stale-edit exclusion]
+If the bytes inside an edit's interval change after the edit is proposed, a
+collision-resistant expected-slice hash causes validation to reject the edit,
+except with negligible collision probability.
+\end{theorem}
+
+\begin{proof}
+Changing the interval changes the hash input. Acceptance would therefore
+require a collision or second preimage for the selected digest.
+\end{proof}
+
+The benchmark applies an edit, reparses the candidate, checks complete source
+coverage, and then applies the inverse edit. A compact representation is:
+
+\begin{lstlisting}[language={},caption={Illustrative edit loop.},label={lst:loop}]
+for edit in edits:
+    candidate = validate_and_apply(source, edit)
+    assert complete_coverage(candidate)
+    source = apply_inverse(candidate, edit)
+\end{lstlisting}

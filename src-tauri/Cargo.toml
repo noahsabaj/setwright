@@ -1,0 +1,56 @@
+[package]
+name = "setwright-desktop"
+default-run = "setwright-desktop"
+version = "0.1.0"
+description = "A local-first visual editor for LaTeX research papers"
+authors = ["Setwright contributors"]
+license = "Apache-2.0"
+repository = "https://github.com/noahsabaj/setwright"
+edition = "2024"
+rust-version = "1.88"
+
+[lib]
+name = "setwright_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+cc = "1.2"
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+base64 = "0.22.1"
+chrono = { version = "0.4", features = ["serde"] }
+ed25519-dalek = { version = "3.0.0", features = ["signature"] }
+hex = "0.4"
+parking_lot = "0.12"
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
+ropey = "1.6"
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_json_canonicalizer = "0.3.2"
+sha2 = "0.10"
+specta = { version = "=2.0.0-rc.25", features = ["chrono", "derive", "uuid"] }
+specta-typescript = "=0.0.12"
+tauri = { version = "2", default-features = false, features = ["wry", "compression", "dynamic-acl", "x11", "dbus"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-specta = { version = "=2.0.0-rc.25", features = ["derive", "typescript"] }
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["time"] }
+tree-sitter = "=0.25.10"
+tree-sitter-latex = { package = "codebook-tree-sitter-latex", version = "=0.6.1" }
+tree-sitter-language = "=0.1.7"
+uuid = { version = "1", features = ["v4", "serde"] }
+url = "2.5"
+walkdir = "2"
+zip = { version = "4", default-features = false, features = ["deflate"] }
+zstd = "0.13.3"
+
+[dev-dependencies]
+pretty_assertions = "1"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

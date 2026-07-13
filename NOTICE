@@ -1,0 +1,14 @@
+Setwright
+Copyright 2026 Setwright contributors
+
+This product includes software developed by Setwright contributors.
+
+The names "Setwright" and the Setwright visual identity are not licensed under
+the Apache License 2.0. See TRADEMARK.md.
+
+This source distribution vendors tree-sitter-bibtex, copyright (c) 2020
+Patrick Förster, under the MIT License. See vendor/tree-sitter-bibtex/LICENSE.
+
+Third-party notices for distributed binaries and managed runtime profiles must
+be generated from the exact locked dependency and runtime manifests at release
+time. This source-tree NOTICE is not a substitute for that release artifact.

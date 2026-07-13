@@ -1,0 +1,19 @@
+* text=auto eol=lf
+
+*.png binary
+*.ico binary
+*.icns binary
+*.pdf binary
+*.zip binary
+*.zst binary
+*.woff binary
+*.woff2 binary
+
+# Keep Windows command scripts native when any are added later.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# These files intentionally encode whitespace-sensitive fixtures or are
+# generated verbatim by Specta. Their trailing spaces must survive review.
+src/editor/latex-roundtrip.test.ts -whitespace
+src/lib/bindings.ts -whitespace

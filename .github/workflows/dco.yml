@@ -1,0 +1,34 @@
+name: DCO
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  signoff:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require Signed-off-by in every pull request commit
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          missing=0
+          while IFS= read -r commit; do
+            author_name="$(git show -s --format=%an "$commit")"
+            author_email="$(git show -s --format=%ae "$commit")"
+            expected="Signed-off-by: $author_name <$author_email>"
+            if ! git show -s --format=%B "$commit" |
+              awk -v expected="$expected" 'BEGIN { found = 0 } tolower($0) == tolower(expected) { found = 1 } END { exit !found }'; then
+              echo "::error::Commit $commit must contain a Signed-off-by trailer matching its author: $expected"
+              missing=1
+            fi
+          done < <(git rev-list "$BASE_SHA..$HEAD_SHA")
+          exit "$missing"

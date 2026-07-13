@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "profileId": "texlive-2025-2025-08-03",
+  "texLiveSnapshot": {
+    "version": 2025,
+    "date": "2025-08-03"
+  },
+  "platform": "windows",
+  "architecture": "x86_64",
+  "engines": [
+    "pdflatex",
+    "xelatex"
+  ],
+  "archive": {
+    "url": "https://downloads.example.test/setwright/texlive-2025-windows-x86_64.tar.zst",
+    "sizeBytes": 4294967296,
+    "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "canonicalization": "RFC8785",
+    "keyId": "example-non-production-key",
+    "value": "AA=="
+  },
+  "sbom": {
+    "path": "metadata/runtime.spdx.json",
+    "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "format": "SPDX-JSON-2.3"
+  },
+  "licenseInventory": {
+    "path": "metadata/licenses.json",
+    "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+  },
+  "createdAt": "2026-07-13T18:00:00Z"
+}

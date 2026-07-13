@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "projectId": "df52a305-8138-432b-a3a7-1700eb5031a4",
+  "mainFile": "main.tex",
+  "templateId": "generic-article",
+  "runtimeId": "texlive-2025-2025-08-03",
+  "engine": "pdflatex"
+}

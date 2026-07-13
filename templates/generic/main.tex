@@ -1,0 +1,77 @@
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage[hidelinks]{hyperref}
+\usepackage[nameinlink,noabbrev]{cleveref}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{definition}{Definition}
+
+\title{A Clear and Specific Paper Title}
+\author{First Author \\ Institution \\ \texttt{author@example.edu}}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+State the problem, method, principal result, and implication in a compact
+paragraph.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:introduction}
+
+Explain the research question and the evidence that motivates it. Cite related
+work with ordinary BibTeX keys, for example \cite{lamport1994latex}.
+
+\section{Method}
+\label{sec:method}
+
+Define the method precisely. A numbered equation can be referenced without
+hard-coding its number:
+\begin{equation}
+  \label{eq:objective}
+  \mathcal{L}(\theta) = \frac{1}{n}\sum_{i=1}^{n}
+  \ell\bigl(f_{\theta}(x_i), y_i\bigr).
+\end{equation}
+
+\section{Results}
+\label{sec:results}
+
+Report uncertainty and experimental conditions alongside point estimates.
+
+\begin{table}[t]
+  \centering
+  \caption{Replace this table with the primary comparison.}
+  \label{tab:results}
+  \begin{tabular}{lrr}
+    \toprule
+    Method & Accuracy & Time (s) \\
+    \midrule
+    Baseline & 0.81 & 14.2 \\
+    Proposed & 0.86 & 12.8 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+As \cref{eq:objective,tab:results} illustrate, labels keep references stable
+when the paper changes.
+
+\section{Conclusion}
+
+Summarize the supported claim, limitations, and next experiment.
+
+\bibliographystyle{plain}
+\bibliography{references}
+
+\end{document}

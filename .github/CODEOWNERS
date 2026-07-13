@@ -1,0 +1,11 @@
+# Default review routing. Do not enable required code-owner approval while the
+# project has only one maintainer, because GitHub does not allow authors to
+# approve their own pull requests.
+* @noahsabaj
+
+# Security-sensitive boundaries.
+/src-tauri/src/services/sandbox.rs @noahsabaj
+/src-tauri/src/services/compiler.rs @noahsabaj
+/src-tauri/src/services/runtime.rs @noahsabaj
+/src-tauri/src/core/persistence.rs @noahsabaj
+/.github/workflows/ @noahsabaj

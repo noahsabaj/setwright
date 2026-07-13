@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "bundleId": "28ef6dbd-7bca-4d32-b009-4549dd73cd52",
+  "projectId": "0f83e083-4272-4b0f-95a0-4cb4f57bd622",
+  "projectHash": "1111111111111111111111111111111111111111111111111111111111111111",
+  "baseFiles": [
+    {
+      "fileId": "main",
+      "path": "main.tex",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "byteLength": 2400
+    }
+  ],
+  "reviewer": {
+    "id": "a7d0d150-476b-4d8e-8158-bb68b308ce9d",
+    "displayName": "Ada Reviewer",
+    "email": "ada@example.test"
+  },
+  "exportedAt": "2026-07-13T18:00:00Z",
+  "threads": [
+    {
+      "id": "dc39fc28-341e-46b8-8ce2-834d8c9e8184",
+      "anchor": {
+        "fileId": "main",
+        "startByte": 120,
+        "endByte": 132,
+        "baseFileHash": "2222222222222222222222222222222222222222222222222222222222222222",
+        "expectedSource": "our baseline",
+        "prefixContext": "Compared with ",
+        "suffixContext": ", the method"
+      },
+      "status": "open",
+      "createdAt": "2026-07-13T17:55:00Z",
+      "resolvedAt": null,
+      "messages": [
+        {
+          "id": "fcacef2b-9d7e-4602-ab58-69bfd97ece1d",
+          "author": {
+            "id": "a7d0d150-476b-4d8e-8158-bb68b308ce9d",
+            "displayName": "Ada Reviewer",
+            "email": "ada@example.test"
+          },
+          "createdAt": "2026-07-13T17:55:00Z",
+          "body": "Name the baseline here."
+        }
+      ]
+    }
+  ],
+  "suggestions": [
+    {
+      "id": "38e5c276-0fbf-4a75-9caf-e47e1c32b1ec",
+      "order": 0,
+      "author": {
+        "id": "a7d0d150-476b-4d8e-8158-bb68b308ce9d",
+        "displayName": "Ada Reviewer",
+        "email": "ada@example.test"
+      },
+      "createdAt": "2026-07-13T17:58:00Z",
+      "anchor": {
+        "fileId": "main",
+        "startByte": 120,
+        "endByte": 132,
+        "baseFileHash": "2222222222222222222222222222222222222222222222222222222222222222",
+        "expectedSource": "our baseline",
+        "prefixContext": "Compared with ",
+        "suffixContext": ", the method"
+      },
+      "replacement": "the calibrated baseline",
+      "status": "pending"
+    }
+  ]
+}

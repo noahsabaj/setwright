@@ -1,0 +1,282 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:setwright:schema:review-bundle:v1",
+  "title": "ReviewBundleV1",
+  "description": "Portable comments and ordered source suggestions for an exact paper base.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "bundleId",
+    "projectId",
+    "projectHash",
+    "baseFiles",
+    "reviewer",
+    "exportedAt",
+    "threads",
+    "suggestions"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "bundleId": {
+      "$ref": "#/$defs/uuid"
+    },
+    "projectId": {
+      "$ref": "#/$defs/uuid"
+    },
+    "projectHash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "baseFiles": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/baseFile"
+      }
+    },
+    "reviewer": {
+      "$ref": "#/$defs/identity"
+    },
+    "exportedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "threads": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/thread"
+      }
+    },
+    "suggestions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/suggestion"
+      }
+    }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^\\u0000]+$"
+    },
+    "baseFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fileId",
+        "path",
+        "sha256",
+        "byteLength"
+      ],
+      "properties": {
+        "fileId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "path": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "byteLength": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "displayName"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 320
+        }
+      }
+    },
+    "anchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fileId",
+        "startByte",
+        "endByte",
+        "baseFileHash",
+        "expectedSource",
+        "prefixContext",
+        "suffixContext"
+      ],
+      "properties": {
+        "fileId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "startByte": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "endByte": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "baseFileHash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "expectedSource": {
+          "type": "string",
+          "maxLength": 1048576
+        },
+        "prefixContext": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "suffixContext": {
+          "type": "string",
+          "maxLength": 4096
+        }
+      }
+    },
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "author",
+        "createdAt",
+        "body"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "author": {
+          "$ref": "#/$defs/identity"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "body": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        }
+      }
+    },
+    "thread": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "anchor",
+        "status",
+        "createdAt",
+        "messages"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "anchor": {
+          "$ref": "#/$defs/anchor"
+        },
+        "status": {
+          "enum": [
+            "open",
+            "resolved"
+          ]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "resolvedAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "messages": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/message"
+          }
+        }
+      }
+    },
+    "suggestion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "order",
+        "author",
+        "createdAt",
+        "anchor",
+        "replacement",
+        "status"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "author": {
+          "$ref": "#/$defs/identity"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "anchor": {
+          "$ref": "#/$defs/anchor"
+        },
+        "replacement": {
+          "type": "string",
+          "maxLength": 1048576
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "accepted",
+            "rejected",
+            "conflict"
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability privately
+    url: https://github.com/noahsabaj/setwright/security/advisories/new
+    about: Do not disclose vulnerabilities or malicious paper fixtures publicly.

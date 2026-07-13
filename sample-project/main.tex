@@ -1,0 +1,60 @@
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage[hidelinks]{hyperref}
+\usepackage[nameinlink,noabbrev]{cleveref}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{definition}{Definition}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  frame=single,
+  columns=fullflexible,
+  keepspaces=true
+}
+
+\title{Auditable Editing for Structured Research Papers}
+\author{
+  Mira Chen \\ Northstar Research \\ \texttt{mira@example.edu}
+  \and
+  Tomas Rivera \\ Northstar Research \\ \texttt{tomas@example.edu}
+}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Research editors must balance structured interaction with exact source
+preservation. We describe a synthetic benchmark for small, revision-checked
+LaTeX edits and report illustrative results on a deliberately modest corpus.
+The example demonstrates Setwright's supported paper structures; it does not
+make an empirical product claim.
+\end{abstract}
+
+\input{sections/introduction}
+\input{sections/method}
+\input{sections/results}
+
+\section{Limitations and conclusion}
+\label{sec:conclusion}
+
+The benchmark omits arbitrary macro expansion and stateful TeX. Those regions
+must remain exact raw source rather than being normalized into a visual model.
+Future work should evaluate larger, permissively licensed paper corpora and all
+supported operating-system sandboxes.
+
+\bibliographystyle{plain}
+\bibliography{references}
+
+\end{document}

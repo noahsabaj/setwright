@@ -1,0 +1,26 @@
+\section{Introduction}
+\label{sec:introduction}
+
+LaTeX gives researchers durable, inspectable source, while structured editors
+can reduce the cost of common operations. Existing scientific workflows also
+depend on citations, stable cross-references, and mathematical notation
+\cite{lamport1994latex,vaswani2017attention}. A dependable bridge between those
+interfaces cannot silently rewrite syntax it does not understand.
+
+We study a narrow question: can a structured edit be represented as a minimal
+byte patch and rejected when its source precondition is stale? This sample uses
+a static include graph so every visual operation remains inside one file
+boundary. A source span is measured in UTF-8 bytes, not displayed characters.\footnote{This distinction matters for non-ASCII source text.}
+
+Our illustrative pipeline is shown in \cref{fig:pipeline}; the validation rule
+is formalized in \cref{sec:method}.
+
+\begin{figure}[t]
+  \centering
+  \fbox{\parbox[c][2.6cm][c]{0.78\linewidth}{\centering
+    Intent $\rightarrow$ minimal patch $\rightarrow$ candidate parse
+    $\rightarrow$ atomic commit}}
+  \caption{A source-authoritative editing pipeline. The diagram is rendered
+  with ordinary LaTeX so the sample has no binary asset dependency.}
+  \label{fig:pipeline}
+\end{figure}

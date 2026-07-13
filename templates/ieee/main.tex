@@ -1,0 +1,76 @@
+\documentclass[conference]{IEEEtran}
+
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage[hidelinks]{hyperref}
+
+\title{A Clear and Specific Paper Title}
+
+\author{
+  \IEEEauthorblockN{First Author}
+  \IEEEauthorblockA{Department or Laboratory \\
+  Institution \\
+  City, Country \\
+  author@example.edu}
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+State the problem, method, principal result, and implication in a compact
+paragraph.
+\end{abstract}
+
+\begin{IEEEkeywords}
+scientific writing, reproducibility, research software
+\end{IEEEkeywords}
+
+\section{Introduction}
+\label{sec:introduction}
+
+Explain the research question and position it against relevant work such as
+\cite{lamport1994latex}.
+
+\section{Method}
+\label{sec:method}
+
+Define the method, assumptions, and evaluation protocol.
+
+\begin{equation}
+  \label{eq:objective}
+  \mathcal{L}(\theta) = \frac{1}{n}\sum_{i=1}^{n}
+  \ell\bigl(f_{\theta}(x_i), y_i\bigr).
+\end{equation}
+
+\section{Results}
+\label{sec:results}
+
+\begin{table}[t]
+  \centering
+  \caption{Replace this table with the primary comparison.}
+  \label{tab:results}
+  \begin{tabular}{lrr}
+    \toprule
+    Method & Accuracy & Time (s) \\
+    \midrule
+    Baseline & 0.81 & 14.2 \\
+    Proposed & 0.86 & 12.8 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Report uncertainty and all material experimental conditions.
+
+\section{Conclusion}
+
+Summarize the supported claim and limitations.
+
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+\end{document}

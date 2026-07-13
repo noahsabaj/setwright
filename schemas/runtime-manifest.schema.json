@@ -1,0 +1,189 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:setwright:schema:runtime-manifest:v1",
+  "title": "RuntimeManifestV1",
+  "description": "Signed metadata for one immutable TeX runtime archive on one platform and architecture.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "profileId",
+    "texLiveSnapshot",
+    "platform",
+    "architecture",
+    "engines",
+    "archive",
+    "signature",
+    "sbom",
+    "licenseInventory",
+    "createdAt"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "profileId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+    },
+    "texLiveSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "date"
+      ],
+      "properties": {
+        "version": {
+          "type": "integer",
+          "minimum": 2000,
+          "maximum": 9999
+        },
+        "date": {
+          "type": "string",
+          "format": "date"
+        }
+      }
+    },
+    "platform": {
+      "enum": [
+        "windows",
+        "macos",
+        "linux"
+      ]
+    },
+    "architecture": {
+      "enum": [
+        "x86_64",
+        "aarch64"
+      ]
+    },
+    "engines": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "pdflatex",
+          "xelatex"
+        ]
+      }
+    },
+    "archive": {
+      "$ref": "#/$defs/artifact"
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Ed25519 signature over RFC 8785 canonical JSON with signature.value represented by the empty string.",
+      "required": [
+        "algorithm",
+        "canonicalization",
+        "keyId",
+        "value"
+      ],
+      "properties": {
+        "algorithm": {
+          "const": "ed25519"
+        },
+        "canonicalization": {
+          "const": "RFC8785"
+        },
+        "keyId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "value": {
+          "type": "string",
+          "contentEncoding": "base64",
+          "minLength": 1
+        }
+      }
+    },
+    "sbom": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256",
+        "format"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "format": {
+          "enum": [
+            "SPDX-JSON-2.3",
+            "CycloneDX-JSON-1.6"
+          ]
+        }
+      }
+    },
+    "licenseInventory": {
+      "$ref": "#/$defs/localDocument"
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "httpsUrl": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://"
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^\\u0000]+$"
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "url",
+        "sizeBytes",
+        "sha256"
+      ],
+      "properties": {
+        "url": {
+          "$ref": "#/$defs/httpsUrl"
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "localDocument": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    }
+  }
+}

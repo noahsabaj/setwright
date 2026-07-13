@@ -1,0 +1,75 @@
+\documentclass[sigconf,review,anonymous]{acmart}
+
+\usepackage{booktabs}
+\usepackage{listings}
+
+\setcopyright{none}
+\settopmatter{printacmref=false}
+\renewcommand\footnotetextcopyrightpermission[1]{}
+\acmConference[Draft venue]{Draft venue}{Month DD--DD, YYYY}{City, Country}
+\acmBooktitle{Draft venue, Month DD--DD, YYYY, City, Country}
+
+\title{A Clear and Specific Paper Title}
+
+\author{Anonymous Author(s)}
+\affiliation{%
+  \institution{Anonymous Institution}
+  \country{Anonymous}
+}
+
+\begin{document}
+
+\begin{abstract}
+State the problem, method, principal result, and implication in a compact
+paragraph.
+\end{abstract}
+
+\keywords{scientific writing, reproducibility, research software}
+
+\maketitle
+
+\section{Introduction}
+\label{sec:introduction}
+
+Explain the research question and position it against relevant work such as
+\cite{lamport1994latex}.
+
+\section{Method}
+\label{sec:method}
+
+Define the method, assumptions, and evaluation protocol. Use semantic labels
+for equations, figures, and tables.
+
+\begin{equation}
+  \label{eq:objective}
+  \mathcal{L}(\theta) = \frac{1}{n}\sum_{i=1}^{n}
+  \ell\bigl(f_{\theta}(x_i), y_i\bigr).
+\end{equation}
+
+\section{Results}
+\label{sec:results}
+
+\begin{table}[t]
+  \centering
+  \caption{Replace this table with the primary comparison.}
+  \label{tab:results}
+  \begin{tabular}{lrr}
+    \toprule
+    Method & Accuracy & Time (s) \\
+    \midrule
+    Baseline & 0.81 & 14.2 \\
+    Proposed & 0.86 & 12.8 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Report uncertainty and all material experimental conditions.
+
+\section{Conclusion}
+
+Summarize the supported claim and limitations.
+
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{references}
+
+\end{document}

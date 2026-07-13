@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend checks
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        shell: bash
+        run: |
+          if [[ -f pnpm-lock.yaml ]]; then
+            pnpm install --frozen-lockfile
+          else
+            echo "::warning::pnpm-lock.yaml is missing; releases must commit a lockfile"
+            pnpm install --no-frozen-lockfile
+          fi
+      - run: pnpm lint
+      - run: pnpm test
+      - run: pnpm build
+
+  rust:
+    name: Rust (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-22.04
+          - windows-2022
+          - macos-14
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Install Linux desktop libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: 1.88.0
+          components: rustfmt, clippy
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --all-features
+      - name: Generated TypeScript contracts are current
+        if: runner.os == 'Linux'
+        run: |
+          cargo run --manifest-path src-tauri/Cargo.toml --bin export_bindings
+          git diff --exit-code -- src/lib/bindings.ts
+
+  schemas:
+    name: Public schema examples
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: Parse all JSON assets
+        shell: bash
+        run: |
+          while IFS= read -r -d '' file; do
+            node -e 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"))' "$file"
+          done < <(find schemas templates sample-project -name '*.json' -print0)
+      - name: Validate examples against Draft 2020-12 schemas
+        shell: bash
+        run: |
+          npx --yes --package ajv-cli@5.0.0 --package ajv-formats@3.0.1 ajv validate --spec=draft2020 -c ajv-formats -s schemas/paper-settings.schema.json -d schemas/examples/paper-settings.v1.json
+          npx --yes --package ajv-cli@5.0.0 --package ajv-formats@3.0.1 ajv validate --spec=draft2020 -c ajv-formats -s schemas/review-bundle.schema.json -d schemas/examples/review-bundle.v1.json
+          npx --yes --package ajv-cli@5.0.0 --package ajv-formats@3.0.1 ajv validate --spec=draft2020 -c ajv-formats -s schemas/runtime-manifest.schema.json -d schemas/examples/runtime-manifest.v1.example.json
+          npx --yes --package ajv-cli@5.0.0 --package ajv-formats@3.0.1 ajv validate --spec=draft2020 -c ajv-formats -s schemas/arxiv-preflight-report.schema.json -d schemas/examples/arxiv-preflight-report.v1.json
+          for settings in templates/*/paper-settings.json sample-project/paper-settings.json; do
+            npx --yes --package ajv-cli@5.0.0 --package ajv-formats@3.0.1 ajv validate --spec=draft2020 -c ajv-formats -s schemas/paper-settings.schema.json -d "$settings"
+          done
+
+  latex-smoke:
+    name: LaTeX smoke (${{ matrix.project }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        project:
+          - templates/generic
+          - templates/acm
+          - templates/ieee
+          - sample-project
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: xu-cheng/latex-action@e2f99d4b3685b0da93f97e1b86ad8fab81105098 # v3
+        with:
+          root_file: main.tex
+          working_directory: ${{ matrix.project }}
+          args: -pdf -norc -file-line-error -halt-on-error -interaction=nonstopmode
+      - name: Explain scope
+        run: echo "This is a template smoke test, not managed-runtime, sandbox, or arXiv acceptance evidence."

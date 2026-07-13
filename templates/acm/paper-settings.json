@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "projectId": "ff29270a-6103-40a0-8b4e-4c4cb0a66879",
+  "mainFile": "main.tex",
+  "templateId": "acm-acmart",
+  "runtimeId": "texlive-2025-2025-08-03",
+  "engine": "pdflatex"
+}

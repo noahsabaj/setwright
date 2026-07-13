@@ -1,0 +1,37 @@
+name: Feature proposal
+description: Propose a scoped product or architecture change.
+title: "[Proposal]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What research-writing task is difficult today, and for whom?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe success without prescribing an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: source
+    attributes:
+      label: Source-format and compatibility impact
+      description: Note unsupported LaTeX, round-trip, migration, or export implications.
+  - type: textarea
+    id: security
+    attributes:
+      label: Security and accessibility impact
+      description: Identify new authority, network, compile, or interaction requirements.
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: MVP boundaries
+      options:
+        - label: I reviewed the documented MVP exclusions and explained why this belongs now.
+          required: true

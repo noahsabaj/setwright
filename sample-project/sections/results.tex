@@ -1,0 +1,26 @@
+\section{Illustrative results}
+\label{sec:results}
+
+\Cref{tab:results} contains synthetic values chosen only to exercise table
+editing and references. They are not measurements of the Setwright scaffold.
+
+\begin{table}[t]
+  \centering
+  \caption{Synthetic edit-validation outcomes.}
+  \label{tab:results}
+  \begin{tabular}{lrr}
+    \toprule
+    Fixture class & Accepted & Correctly rejected \\
+    \midrule
+    Plain paragraphs & 120 & 0 \\
+    Equations & 84 & 6 \\
+    Raw environments & 0 & 32 \\
+    Stale source spans & 0 & 40 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The intended interpretation follows \cref{eq:eligibility}: ordinary edits with
+matching preconditions proceed, while stale or intentionally unsupported edits
+remain explicit. A real evaluation would report corpus licenses, hardware,
+software versions, confidence intervals, and failure cases.
