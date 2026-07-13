@@ -61,7 +61,7 @@ jobs:
           sudo apt-get install --yes libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
-          toolchain: 1.88.0
+          toolchain: 1.95.0
           components: rustfmt, clippy
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings

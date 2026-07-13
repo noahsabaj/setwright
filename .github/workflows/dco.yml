@@ -19,12 +19,21 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           missing=0
           while IFS= read -r commit; do
             author_name="$(git show -s --format=%an "$commit")"
             author_email="$(git show -s --format=%ae "$commit")"
             expected="Signed-off-by: $author_name <$author_email>"
+            dependabot_expected="Signed-off-by: dependabot[bot] <support@github.com>"
+            if [[ "$PR_AUTHOR" == "dependabot[bot]" &&
+                  "$author_name" == "dependabot[bot]" &&
+                  "$author_email" == "49699333+dependabot[bot]@users.noreply.github.com" ]] &&
+               git show -s --format=%B "$commit" |
+                 grep -Fxiq "$dependabot_expected"; then
+              continue
+            fi
             if ! git show -s --format=%B "$commit" |
               awk -v expected="$expected" 'BEGIN { found = 0 } tolower($0) == tolower(expected) { found = 1 } END { exit !found }'; then
               echo "::error::Commit $commit must contain a Signed-off-by trailer matching its author: $expected"
