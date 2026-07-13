@@ -1,10 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="733" height="178" viewBox="0 0 733 178" role="img" aria-labelledby="title description">
-  <title id="title">Setwright</title>
-  <desc id="description">Write papers, not TeX. A local-first, open-source visual editor for LaTeX research papers.</desc>
-  <rect width="733" height="178" fill="#ffffff"/>
-  <g fill="#000000" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
-    <text x="10" y="40" font-size="36" font-weight="650" letter-spacing="-1">Setwright</text>
-    <text x="10" y="106" font-size="28" font-weight="700" letter-spacing="-0.5">Write papers, not TeX.</text>
-    <text x="10" y="154" font-size="24" font-weight="600" letter-spacing="-0.35">A local-first, open-source visual editor for LaTeX research papers.</text>
-  </g>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="733" height="178" aria-labelledby="title description" role="img" viewBox="0 0 733 178"><title id="title">Setwright</title><desc id="description">Write papers, not TeX. A local-first, open-source visual editor for LaTeX research papers.</desc><rect width="733" height="178" fill="#fff"/><g fill="#000" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"><text x="10" y="40" font-size="36" font-weight="650" letter-spacing="-1">Setwright</text><text x="10" y="106" font-size="28" font-weight="700" letter-spacing="-.5">Write papers, not TeX.</text><text x="10" y="154" font-size="24" font-weight="600" letter-spacing="-.35">A local-first, open-source visual editor for LaTeX research papers.</text></g></svg>
