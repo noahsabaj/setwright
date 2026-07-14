@@ -16,6 +16,11 @@ updates:
       tiptap:
         patterns:
           - "@tiptap/*"
+      vite-toolchain:
+        patterns:
+          - "@vitejs/*"
+          - vite
+          - vitest
   - package-ecosystem: cargo
     directory: /src-tauri
     schedule:
