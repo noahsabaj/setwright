@@ -2,7 +2,7 @@
 
 ## Toolchain
 
-Use Node.js 22+, pnpm 11, Rust 1.95+, and the Tauri 2 prerequisites for the host
+Use Node.js 22.13+ or 24+, pnpm 11, Rust 1.95+, and the Tauri 2 prerequisites for the host
 platform. Keep package-manager and Rust lockfiles committed once generated; CI
 must install from them without silently upgrading dependencies.
 

@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "license": "Apache-2.0",
+  "engines": {
+    "node": "^22.13.0 || >=24.0.0"
+  },
   "description": "A local-first visual editor for LaTeX research papers",
   "homepage": "https://github.com/noahsabaj/setwright#readme",
   "repository": {
@@ -50,7 +53,7 @@
     "zustand": "^5.0.0"
   },
   "devDependencies": {
-    "@eslint/js": "^9.0.0",
+    "@eslint/js": "^10.0.1",
     "@tauri-apps/cli": "^2.0.0",
     "@testing-library/jest-dom": "^6.0.0",
     "@testing-library/react": "^16.0.0",
@@ -59,10 +62,10 @@
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.0.0",
-    "eslint": "^9.0.0",
+    "eslint": "^10.7.0",
     "eslint-plugin-react-hooks": "^7.0.0",
     "eslint-plugin-react-refresh": "^0.4.0",
-    "globals": "^16.0.0",
+    "globals": "^17.7.0",
     "jsdom": "^26.0.0",
     "typescript": "~5.9.0",
     "typescript-eslint": "^8.0.0",

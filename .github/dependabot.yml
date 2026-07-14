@@ -5,6 +5,17 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    groups:
+      eslint-tooling:
+        patterns:
+          - "@eslint/*"
+          - eslint
+          - "eslint-*"
+          - globals
+          - typescript-eslint
+      tiptap:
+        patterns:
+          - "@tiptap/*"
   - package-ecosystem: cargo
     directory: /src-tauri
     schedule:
@@ -15,3 +26,7 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns:
+          - "*"

@@ -469,8 +469,8 @@ function parseStatementEnvironment(
   if (!isSafeLabel(label)) return rawDraft(source, start, end, environment);
   let labelPlacement: "prefix" | "suffix" | "none" = "none";
   let labelToken = "";
-  let contentCoreStart = 0;
-  let contentCoreEnd = content.length;
+  let contentCoreStart: number;
+  let contentCoreEnd: number;
 
   if (labelMatch !== undefined && labelMatch.index !== undefined) {
     const labelStart = labelMatch.index;
