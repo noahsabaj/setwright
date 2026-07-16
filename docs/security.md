@@ -113,5 +113,7 @@ children, records that the boundary is armed, and then attempts one additional
 child. Evidence is accepted only when the native limit rejects that exact extra
 spawn or the service watchdog terminates the armed process tree. The probe never
 uses an unbounded fork storm, which could exhaust the shared CI account before
-the sandbox boundary can report its result. This split is part of the non-closing
-prototype and must be reviewed again against the packaged release candidate.
+the sandbox boundary can report its result. Linux accounts for the pinned
+bubblewrap monitor and PID-namespace init separately, so neither consumes the
+compiler's child budget. This split is part of the non-closing prototype and
+must be reviewed again against the packaged release candidate.
