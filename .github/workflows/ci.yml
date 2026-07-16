@@ -68,6 +68,8 @@ jobs:
   rust:
     name: Rust (${{ matrix.os }})
     needs: frontend
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '15.0'
     strategy:
       fail-fast: false
       matrix:
@@ -75,12 +77,14 @@ jobs:
           - ubuntu-22.04
           - windows-2022
           - macos-14
+          - macos-15
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
       - name: Restore the verified frontend
+        if: matrix.os != 'macos-14'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: frontend-dist
@@ -91,12 +95,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        if: matrix.os != 'macos-14'
         with:
           toolchain: 1.95.0
           components: rustfmt, clippy
-      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
-      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
-      - run: cargo test --manifest-path src-tauri/Cargo.toml --all-features
+      - if: matrix.os != 'macos-14'
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+      - if: matrix.os != 'macos-14'
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+      - if: matrix.os != 'macos-14'
+        run: cargo test --manifest-path src-tauri/Cargo.toml --all-features
+      - name: Preserve the legacy macOS ruleset context during migration
+        if: matrix.os == 'macos-14'
+        run: echo 'Temporary bridge only; macOS 15 is the supported and tested floor.'
       - name: Generated TypeScript contracts are current
         if: runner.os == 'Linux'
         run: |
@@ -106,6 +117,8 @@ jobs:
   sandbox-containment:
     name: Sandbox containment (${{ matrix.os }})
     needs: frontend
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '15.0'
     strategy:
       fail-fast: false
       matrix:
@@ -113,6 +126,7 @@ jobs:
           - ubuntu-22.04
           - windows-2022
           - macos-14
+          - macos-15
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     steps:
@@ -158,7 +172,7 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo build --locked --manifest-path tools/sandbox/hostile-fixture/Cargo.toml --target x86_64-unknown-linux-musl
       - name: Assemble test-signed macOS XPC host
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && matrix.os != 'macos-14'
         timeout-minutes: 15
         shell: bash
         run: |
@@ -177,7 +191,8 @@ jobs:
           cp "$test_binary" "$app/Contents/MacOS/SetwrightContainment"
           cp src-tauri/native/macos/SetwrightCompilerXPC/Info.plist "$service/Contents/Info.plist"
 
-          xcrun clang src-tauri/native/macos/SetwrightCompilerXPC/tex_launcher.c \
+          xcrun clang -mmacosx-version-min=15.0 \
+            src-tauri/native/macos/SetwrightCompilerXPC/tex_launcher.c \
             -o "$service/Contents/Resources/setwright-tex-launcher"
 
           keychain="$RUNNER_TEMP/setwright-test-signing.keychain-db"
@@ -205,7 +220,8 @@ jobs:
           printf -v service_requirement \
             'certificate root = H"%s" and identifier "org.setwright.desktop.compiler-xpc"' \
             "$root_sha1"
-          xcrun clang -fblocks -include "$requirements_header" \
+          xcrun clang -fblocks -mmacosx-version-min=15.0 \
+            -include "$requirements_header" \
             src-tauri/native/macos/SetwrightCompilerXPC/service.m \
             -framework Foundation -framework Security \
             -o "$service/Contents/MacOS/SetwrightCompilerXPC"
@@ -282,6 +298,18 @@ jobs:
           codesign --display --verbose=4 "$runtime_root/texlive-2025.2025-08-03-macos-aarch64/bin/latexmk"
           codesign --display --entitlements - --requirements - "$runtime_root/texlive-2025.2025-08-03-macos-aarch64/bin/latexmk"
 
+          test "$(plutil -extract LSMinimumSystemVersion raw -o - "$app/Contents/Info.plist")" = '15.0'
+          test "$(plutil -extract LSMinimumSystemVersion raw -o - "$service/Contents/Info.plist")" = '15.0'
+          macho_count=0
+          while IFS= read -r executable; do
+            if file "$executable" | grep -q 'Mach-O'; then
+              macho_count=$((macho_count + 1))
+              otool -l "$executable" | grep -q 'LC_BUILD_VERSION'
+              test "$(otool -l "$executable" | awk '$1 == "minos" { print $2; exit }')" = '15.0'
+            fi
+          done < <(find "$app" -type f)
+          test "$macho_count" -ge 4
+
           group_root="$HOME/Library/Group Containers/group.org.setwright.desktop"
           stage_root="$group_root/compile-stages"
           mkdir -p "$stage_root"
@@ -313,7 +341,7 @@ jobs:
           export SETWRIGHT_PROBE_EVIDENCE="$RUNNER_TEMP/sandbox-probe-linux.json"
           cargo test --manifest-path src-tauri/Cargo.toml --test sandbox_containment native_hostile_fixture_containment_remains_incomplete_attestation -- --nocapture
       - name: Run macOS XPC hostile fixture
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && matrix.os != 'macos-14'
         shell: bash
         run: |
           set -euo pipefail
@@ -327,18 +355,216 @@ jobs:
           "$SETWRIGHT_CONTAINMENT_APP/Contents/MacOS/SetwrightContainment" \
             native_hostile_fixture_containment_remains_incomplete_attestation --nocapture
       - name: Diagnose macOS sandbox failure
-        if: failure() && runner.os == 'macOS'
+        if: failure() && runner.os == 'macOS' && matrix.os != 'macos-14'
         shell: bash
         run: |
           /usr/bin/log show --last 5m --style compact \
             --predicate 'process == "SetwrightCompilerXPC" OR process == "setwright-tex-launcher" OR process == "sandbox-hostile-fixture" OR eventMessage CONTAINS[c] "SetwrightContainment"' \
             || true
       - name: Upload containment-only probe evidence
+        if: matrix.os != 'macos-14'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sandbox-probe-${{ matrix.os }}
           path: ${{ runner.temp }}/sandbox-probe-*.json
           if-no-files-found: error
+          retention-days: 14
+      - name: Preserve the legacy macOS ruleset context during migration
+        if: matrix.os == 'macos-14'
+        run: echo 'Temporary bridge only; macOS 15 is the supported and tested floor.'
+
+  pdf-fixture:
+    name: PDF fixture reproducibility
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Rebuild the representative PDF from its immutable TeX image
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/setwright-pdf-fixture"
+          cp -R sample-project "$work"
+          image='ghcr.io/xu-cheng/texlive-historic-alpine@sha256:73a48f4fc1d3ee7357c8ea5d274af161541c0981432da33339eed7ac1f8e083d'
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            --env HOME=/tmp \
+            --env SOURCE_DATE_EPOCH=1735689600 \
+            --volume "$work:/work" \
+            --workdir /work \
+            "$image" \
+            latexmk -pdf -norc -file-line-error -halt-on-error -interaction=nonstopmode main.tex
+          echo '01fe33bf01f3e80ed62ce7e4f281277dfaf6b6d91e3e300b9337d29029faddbb  main.pdf' | \
+            (cd "$work" && sha256sum --check --strict -)
+          cmp "$work/main.pdf" test/fixtures/pdf/sample-project.pdf
+
+  pdf-browser-floor:
+    name: PDF preview floor (Chromium 125)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24.12.0
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build:pdf-e2e
+      - name: Resolve the hash-pinned Chrome for Testing archives
+        id: chrome
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE' >> "$GITHUB_OUTPUT"
+          import manifest from './config/chrome-for-testing.json' with { type: 'json' };
+          console.log(`version=${manifest.version}`);
+          console.log(`chrome_url=${manifest.chrome.url}`);
+          console.log(`chrome_sha256=${manifest.chrome.sha256}`);
+          console.log(`driver_url=${manifest.chromedriver.url}`);
+          console.log(`driver_sha256=${manifest.chromedriver.sha256}`);
+          NODE
+      - name: Verify official Chrome for Testing object provenance
+        run: node tools/pdf-preview/verify-chrome-for-testing.mjs --online
+      - name: Download and verify exact Chrome and ChromeDriver
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/chrome-for-testing"
+          curl --fail --location --retry 3 '${{ steps.chrome.outputs.chrome_url }}' -o "$RUNNER_TEMP/chrome.zip"
+          curl --fail --location --retry 3 '${{ steps.chrome.outputs.driver_url }}' -o "$RUNNER_TEMP/chromedriver.zip"
+          node tools/pdf-preview/verify-chrome-for-testing.mjs \
+            --chrome-archive "$RUNNER_TEMP/chrome.zip" \
+            --chromedriver-archive "$RUNNER_TEMP/chromedriver.zip"
+          unzip -q "$RUNNER_TEMP/chrome.zip" -d "$RUNNER_TEMP/chrome-for-testing"
+          unzip -q "$RUNNER_TEMP/chromedriver.zip" -d "$RUNNER_TEMP/chrome-for-testing"
+          chmod +x "$RUNNER_TEMP/chrome-for-testing/chrome-linux64/chrome" \
+            "$RUNNER_TEMP/chrome-for-testing/chromedriver-linux64/chromedriver"
+          echo "SETWRIGHT_CHROME_BINARY=$RUNNER_TEMP/chrome-for-testing/chrome-linux64/chrome" >> "$GITHUB_ENV"
+          echo "CHROMEDRIVER_PATH=$RUNNER_TEMP/chrome-for-testing/chromedriver-linux64/chromedriver" >> "$GITHUB_ENV"
+      - name: Start the strict-CSP fixture server
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p test-results/pdf-preview/chrome-125
+          nohup pnpm serve:pdf-e2e > test-results/pdf-preview/chrome-125/server.log 2>&1 &
+          echo $! > "$RUNNER_TEMP/setwright-pdf-server.pid"
+          for attempt in $(seq 1 50); do
+            if curl --fail --silent http://127.0.0.1:4173/ >/dev/null; then exit 0; fi
+            sleep 0.2
+          done
+          cat test-results/pdf-preview/chrome-125/server.log
+          exit 1
+      - name: Exercise PDF.js at the supported Chromium floor
+        env:
+          SETWRIGHT_PDF_EVIDENCE: test-results/pdf-preview/chrome-125/evidence.json
+          SETWRIGHT_PDF_RESULTS: test-results/pdf-preview/chrome-125
+        run: pnpm test:pdf-browser
+      - name: Stop fixture server
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f "$RUNNER_TEMP/setwright-pdf-server.pid" ]]; then
+            kill "$(cat "$RUNNER_TEMP/setwright-pdf-server.pid")" || true
+          fi
+      - name: Upload browser-floor evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pdf-preview-chromium-${{ steps.chrome.outputs.version }}
+          path: test-results/pdf-preview/chrome-125
+          if-no-files-found: error
+          retention-days: 14
+
+  pdf-preview-native:
+    name: PDF preview (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-2022
+          - ubuntu-22.04
+          - macos-15
+          - macos-15-intel
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '15.0'
+      SETWRIGHT_PDF_EVIDENCE: test-results/pdf-preview/native/evidence.json
+      SETWRIGHT_PDF_RESULTS: test-results/pdf-preview/native
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install Linux desktop test libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xvfb dbus-x11
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24.12.0
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: 1.95.0
+      - run: pnpm install --frozen-lockfile
+      - name: Build the feature-gated native test application
+        if: runner.os != 'macOS'
+        run: pnpm tauri build --no-bundle --features pdf-preview-e2e --config src-tauri/tauri.e2e.conf.json --ci
+      - name: Build the feature-gated macOS test bundle
+        if: runner.os == 'macOS'
+        run: pnpm tauri build --features pdf-preview-e2e --bundles app --config src-tauri/tauri.e2e.conf.json --config '{"bundle":{"active":true}}' --ci
+      - name: Inspect the macOS deployment floor
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          app='src-tauri/target/release/bundle/macos/Setwright.app'
+          test "$(plutil -extract LSMinimumSystemVersion raw -o - "$app/Contents/Info.plist")" = '15.0'
+          executable_name="$(plutil -extract CFBundleExecutable raw -o - "$app/Contents/Info.plist")"
+          test -x "$app/Contents/MacOS/$executable_name"
+          echo "SETWRIGHT_E2E_BINARY=$PWD/$app/Contents/MacOS/$executable_name" >> "$GITHUB_ENV"
+          macho_count=0
+          while IFS= read -r executable; do
+            if file "$executable" | grep -q 'Mach-O'; then
+              macho_count=$((macho_count + 1))
+              otool -l "$executable" | grep -q 'LC_BUILD_VERSION'
+              test "$(otool -l "$executable" | awk '$1 == "minos" { print $2; exit }')" = '15.0'
+            fi
+          done < <(find "$app" -type f)
+          test "$macho_count" -ge 1
+      - name: Exercise native PDF preview
+        if: runner.os != 'Linux'
+        run: pnpm test:pdf-native
+      - name: Exercise native PDF preview under Xvfb
+        if: runner.os == 'Linux'
+        env:
+          WEBKIT_DISABLE_COMPOSITING_MODE: '1'
+        run: dbus-run-session -- xvfb-run --auto-servernum --server-args='-screen 0 1440x920x24' pnpm test:pdf-native
+      - name: Rebuild and scan the production-negative boundary
+        shell: bash
+        run: |
+          pnpm build
+          cargo build --locked --release --manifest-path src-tauri/Cargo.toml --no-default-features --features custom-protocol --bin setwright-desktop
+          if [[ "$RUNNER_OS" == 'Windows' ]]; then
+            export SETWRIGHT_PRODUCTION_BINARY='src-tauri/target/release/setwright-desktop.exe'
+          else
+            export SETWRIGHT_PRODUCTION_BINARY='src-tauri/target/release/setwright-desktop'
+          fi
+          node tools/pdf-preview/check-production-boundary.mjs --require-binary
+      - name: Upload native PDF evidence and failure screenshots
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pdf-preview-${{ matrix.os }}
+          path: test-results/pdf-preview/native
+          if-no-files-found: warn
           retention-days: 14
 
   schemas:

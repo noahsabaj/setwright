@@ -6,6 +6,10 @@ Use Node.js 22.13+ or 24+, pnpm 11, Rust 1.95+, and the Tauri 2 prerequisites fo
 platform. Keep package-manager and Rust lockfiles committed once generated; CI
 must install from them without silently upgrading dependencies.
 
+The authoritative browser and desktop-webview floors live in
+`config/platform-support.json`. See [platform-support.md](platform-support.md)
+before changing Vite targets, Tauri bundle settings, or native preview jobs.
+
 ```sh
 pnpm install
 pnpm dev          # webview only

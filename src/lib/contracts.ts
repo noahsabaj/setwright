@@ -21,6 +21,7 @@ import type {
   UiPdfArtifact as GeneratedUiPdfArtifact,
   UiSaveResult,
   Utf8ConversionPreview as GeneratedUtf8ConversionPreview,
+  WebviewRuntimeInfo as GeneratedWebviewRuntimeInfo,
 } from "./bindings";
 
 // Canonical command and disk-contract types are generated from Rust. The
@@ -47,6 +48,7 @@ export type ExportResult = GeneratedExportResult;
 export type RuntimeReadiness = GeneratedRuntimeReadiness;
 export type PdfArtifact = GeneratedUiPdfArtifact;
 export type Utf8ConversionPreview = GeneratedUtf8ConversionPreview;
+export type WebviewRuntimeInfo = GeneratedWebviewRuntimeInfo;
 
 export type SaveState = "saved" | "saving" | "dirty" | "conflict";
 export type WorkspaceMode = "write" | "source" | "preview" | "split";

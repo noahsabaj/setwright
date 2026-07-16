@@ -24,10 +24,17 @@ runtime hosting, and external acceptance evidence before publishing.
 
 ## Intended artifacts
 
-- Windows 10/11 x64 NSIS installer with Authenticode signature.
-- macOS 13+ Intel and Apple Silicon DMGs, signed and notarized.
-- Linux x86_64 AppImage and `.deb` built against an Ubuntu 22.04 baseline, with
+- Windows 10/11 x64 NSIS installer with Authenticode signature and Evergreen
+  WebView2 `125.0.2535.41` or newer.
+- macOS 15+ with current system updates, for Intel and Apple Silicon, distributed
+  as signed and notarized DMGs.
+- Linux x86_64 AppImage and `.deb` built against a fully security-updated Ubuntu 22.04 baseline, with
   checksums, SBOM, and CI provenance.
+
+The macOS Intel CI image is scheduled to leave GitHub-hosted Actions in August
+2027. Provision a replacement Intel runner before that date; loss of hosted
+capacity is not permission to remove the required Intel preview check or
+silently narrow the supported architecture set.
 
 The application installer does not contain TeX. Managed profile manifests and
 archives are separately signed release inputs and cannot be silently replaced.

@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "version": "125.0.6422.141",
+  "platform": "linux64",
+  "chrome": {
+    "url": "https://storage.googleapis.com/chrome-for-testing-public/125.0.6422.141/linux64/chrome-linux64.zip",
+    "sha256": "757868feb1aeae73a1bfcb1c40c3d0ee0eb03051a3300171fd47e355c15214ec",
+    "gcs": {
+      "generation": "1717010428589440",
+      "size": 151744327,
+      "md5Base64": "AYNgA5OAu3E4lMW1PNbI0w==",
+      "crc32cBase64": "bhMD6A=="
+    }
+  },
+  "chromedriver": {
+    "url": "https://storage.googleapis.com/chrome-for-testing-public/125.0.6422.141/linux64/chromedriver-linux64.zip",
+    "sha256": "8b2871c7b288a463cc6207ff23584b50af0ce3d9169a04f2f943977f95811166",
+    "gcs": {
+      "generation": "1717010430482528",
+      "size": 8713889,
+      "md5Base64": "6wAMy2GcMrtrNhvcJRoPJQ==",
+      "crc32cBase64": "XTibrA=="
+    }
+  }
+}

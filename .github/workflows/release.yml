@@ -77,6 +77,8 @@ jobs:
     name: Package ${{ matrix.label }}
     needs: preflight
     environment: release
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '15.0'
     strategy:
       fail-fast: false
       matrix:

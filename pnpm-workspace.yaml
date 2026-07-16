@@ -2,4 +2,11 @@ packages:
   - .
 
 allowBuilds:
+  edgedriver: false
   esbuild: true
+  geckodriver: false
+
+overrides:
+  # tauri-service 1.2.0 imports this API, released in native-utils 2.5.0.
+  # Upstream issue: https://github.com/webdriverio/desktop-mobile/issues/506
+  "@wdio/tauri-service>@wdio/native-utils": 2.5.0

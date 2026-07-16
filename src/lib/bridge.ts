@@ -13,6 +13,7 @@ import type {
   SaveResult,
   SourceEdit,
   Utf8ConversionPreview,
+  WebviewRuntimeInfo,
 } from "./contracts";
 import { commands } from "./bindings";
 import type { LocalCitationSearch, MetadataLookupRequest, MetadataLookupResponse, OpenedProjectWindow } from "./bindings";
@@ -46,6 +47,7 @@ export interface SetwrightBridge {
   lookupCitationMetadata(sessionId: ProjectSessionId, request: MetadataLookupRequest): Promise<MetadataLookupResponse>;
   saveProject(sessionId: ProjectSessionId, expectedRevision: Revision): Promise<SaveResult>;
   getRuntimeReadiness(): Promise<RuntimeReadiness>;
+  getWebviewRuntimeInfo(): Promise<WebviewRuntimeInfo>;
   startCompile(
     sessionId: ProjectSessionId,
     revision: Revision,
@@ -271,6 +273,16 @@ export const desktopBridge: SetwrightBridge = {
       sandboxBackend: null,
       sandboxAttested: false,
       reason: "The browser preview has no managed TeX runtime or attested OS sandbox.",
+    };
+  },
+
+  async getWebviewRuntimeInfo() {
+    if (isTauriRuntime()) return commands.getWebviewRuntimeInfo();
+    return {
+      engine: "unknown",
+      detectedVersion: null,
+      minimumVersion: null,
+      comparison: "not-comparable",
     };
   },
 

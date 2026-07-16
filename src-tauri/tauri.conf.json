@@ -10,8 +10,10 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "withGlobalTauri": false,
     "security": {
-      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost blob: data:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost blob: data:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self'",
+      "capabilities": ["main-window"]
     },
     "windows": [
       {
@@ -34,7 +36,14 @@
     "longDescription": "A local-first visual editor for standard LaTeX research papers.",
     "copyright": "Copyright Setwright contributors",
     "macOS": {
-      "minimumSystemVersion": "13.0"
+      "minimumSystemVersion": "15.0"
+    },
+    "windows": {
+      "minimumWebview2Version": "125.0.2535.41",
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      }
     },
     "createUpdaterArtifacts": false
   }
