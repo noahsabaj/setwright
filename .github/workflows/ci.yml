@@ -114,6 +114,7 @@ jobs:
           - windows-2022
           - macos-14
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -176,10 +177,6 @@ jobs:
           cp "$test_binary" "$app/Contents/MacOS/SetwrightContainment"
           cp src-tauri/native/macos/SetwrightCompilerXPC/Info.plist "$service/Contents/Info.plist"
 
-          xcrun clang -fblocks \
-            src-tauri/native/macos/SetwrightCompilerXPC/service.m \
-            -framework Foundation -framework Security \
-            -o "$service/Contents/MacOS/SetwrightCompilerXPC"
           xcrun clang src-tauri/native/macos/SetwrightCompilerXPC/tex_launcher.c \
             -o "$service/Contents/Resources/setwright-tex-launcher"
 
@@ -191,6 +188,27 @@ jobs:
             -config "$signing_config" -extensions test_root \
             -keyout "$RUNNER_TEMP/setwright-test-root.key" \
             -out "$RUNNER_TEMP/setwright-test-root.crt"
+          root_sha1="$(openssl x509 -in "$RUNNER_TEMP/setwright-test-root.crt" \
+            -noout -fingerprint -sha1 | sed 's/^[^=]*=//;s/://g')"
+          test "${#root_sha1}" = 40
+          requirements_header="$RUNNER_TEMP/setwright-signing-requirements.h"
+          {
+            printf '#define SETWRIGHT_HOST_REQUIREMENT "certificate root = H\\"%s\\" and identifier \\"org.setwright.desktop\\""\n' "$root_sha1"
+            printf '#define SETWRIGHT_HELPER_REQUIREMENT "certificate root = H\\"%s\\" and entitlement[\\"com.apple.security.inherit\\"] = true"\n' "$root_sha1"
+          } > "$requirements_header"
+          printf -v host_requirement \
+            'certificate root = H"%s" and identifier "org.setwright.desktop"' \
+            "$root_sha1"
+          printf -v helper_requirement \
+            'certificate root = H"%s" and entitlement["com.apple.security.inherit"] = true' \
+            "$root_sha1"
+          printf -v service_requirement \
+            'certificate root = H"%s" and identifier "org.setwright.desktop.compiler-xpc"' \
+            "$root_sha1"
+          xcrun clang -fblocks -include "$requirements_header" \
+            src-tauri/native/macos/SetwrightCompilerXPC/service.m \
+            -framework Foundation -framework Security \
+            -o "$service/Contents/MacOS/SetwrightCompilerXPC"
           openssl req -new -newkey rsa:2048 -nodes \
             -subj '/CN=Setwright CI Test Signing/OU=SETWRIGHTCI/O=Setwright/' \
             -keyout "$RUNNER_TEMP/setwright-test-signing.key" \
@@ -248,6 +266,12 @@ jobs:
             --entitlements "$service_entitlements" "$service"
           codesign --force --keychain "$keychain" --sign "$identity" \
             --identifier org.setwright.desktop "$app"
+          codesign --verify --strict --test-requirement="$host_requirement" "$app"
+          codesign --verify --strict --test-requirement="$service_requirement" "$service"
+          codesign --verify --strict --test-requirement="$helper_requirement" \
+            "$service/Contents/Resources/setwright-tex-launcher"
+          codesign --verify --strict --test-requirement="$helper_requirement" \
+            "$runtime_root/texlive-2025.2025-08-03-macos-aarch64/bin/latexmk"
           codesign --verify --deep --strict --verbose=2 "$app"
           codesign --display --verbose=4 "$service"
           codesign --display --entitlements - "$service"
@@ -266,6 +290,7 @@ jobs:
             echo "SETWRIGHT_XPC_STAGE_ROOT=$stage_root"
             echo "SETWRIGHT_XPC_RUNTIME_ROOT=$runtime_root"
           } >> "$GITHUB_ENV"
+          printf 'SETWRIGHT_XPC_REQUIREMENT=%s\n' "$service_requirement" >> "$GITHUB_ENV"
       - name: Run Windows AppContainer hostile fixture
         if: runner.os == 'Windows'
         shell: pwsh
@@ -295,7 +320,6 @@ jobs:
           export SETWRIGHT_RUN_NATIVE_SANDBOX_PROBE=1
           export SETWRIGHT_XPC_BUNDLE="$SETWRIGHT_CONTAINMENT_APP/Contents/XPCServices/SetwrightCompilerXPC.xpc"
           export SETWRIGHT_XPC_SERVICE_NAME='org.setwright.desktop.compiler-xpc'
-          export SETWRIGHT_XPC_REQUIREMENT='identifier "org.setwright.desktop.compiler-xpc"'
           export SETWRIGHT_XPC_APP_GROUP='group.org.setwright.desktop'
           export SETWRIGHT_USE_PREINSTALLED_RUNTIME=1
           export SETWRIGHT_HOSTILE_FIXTURE_PATH="$PWD/src-tauri/target/debug/sandbox-hostile-fixture"

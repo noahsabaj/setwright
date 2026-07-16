@@ -95,3 +95,11 @@ The workflow emits `SandboxProbeEvidence`, but intentionally leaves pdfLaTeX,
 XeLaTeX, BibTeX, Biber, and SyncTeX false. `SandboxAttestation` must reject that
 evidence. These fixture runs are prototype containment evidence only; they are
 not signed TeX Live or packaged-release acceptance evidence.
+
+Darwin's `RLIMIT_RSS` aliases the virtual-address-space `RLIMIT_AS`, which
+cannot be lowered below the signed launcher's existing mappings. The macOS
+prototype therefore keeps process-count, writable-output, and process-group
+enforcement in the sandboxed XPC service while the signed Rust broker samples
+aggregate descendant RSS and requests service-owned termination. A failed
+sample is fail closed. This split is part of the non-closing prototype and must
+be reviewed again against the packaged release candidate.

@@ -145,7 +145,13 @@ fn process_count_mode() {
     let mut children = Vec::new();
     loop {
         match Command::new(&executable).arg("--fixture-child").spawn() {
-            Ok(child) => children.push(child),
+            Ok(child) => {
+                children.push(child);
+                // Stay hostile and exceed the 32-child policy quickly, while
+                // leaving enough scheduler time for a polling native watchdog
+                // to terminate the tree before the CI account exhausts PIDs.
+                thread::sleep(Duration::from_millis(5));
+            }
             Err(error) => {
                 let _ = fs::write("output/process-limit.txt", error.to_string());
                 loop {

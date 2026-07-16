@@ -22,10 +22,14 @@
 #define SETWRIGHT_APP_GROUP "group.org.setwright.desktop"
 #endif
 #ifndef SETWRIGHT_HOST_REQUIREMENT
-#define SETWRIGHT_HOST_REQUIREMENT "identifier \"org.setwright.desktop\""
+// Packaging must replace the placeholder OU with the release Team ID. Leaving
+// this default in place is deliberately fail-closed.
+#define SETWRIGHT_HOST_REQUIREMENT \
+  "anchor apple generic and certificate leaf[subject.OU] = \"SETWRIGHT_TEAM_ID_REQUIRED\" and identifier \"org.setwright.desktop\""
 #endif
 #ifndef SETWRIGHT_HELPER_REQUIREMENT
-#define SETWRIGHT_HELPER_REQUIREMENT "entitlement[\"com.apple.security.inherit\"] exists"
+#define SETWRIGHT_HELPER_REQUIREMENT \
+  "anchor apple generic and certificate leaf[subject.OU] = \"SETWRIGHT_TEAM_ID_REQUIRED\" and entitlement[\"com.apple.security.inherit\"] = true"
 #endif
 
 extern char **environ;
@@ -36,7 +40,8 @@ extern char **environ;
 @property(nonatomic) uint32_t processLimit;
 @property(nonatomic, copy) NSString *outputRoot;
 @property(atomic) BOOL completed;
-@property(atomic) BOOL watchdogStarted;
+@property(atomic) BOOL resumed;
+@property(atomic) BOOL watchdogReady;
 @property(atomic, copy) NSString *terminationDetail;
 @property(nonatomic) int diagnosticFd;
 @property(nonatomic) int exitCode;
@@ -202,6 +207,7 @@ static int terminate_job(SWJob *job, NSString *detail) {
 
 static void start_watchdog(NSString *jobId, SWJob *job) {
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+    job.watchdogReady = YES;
     unsigned invalidSamples = 0;
     while (!job.completed) {
       @autoreleasepool {
@@ -237,7 +243,7 @@ static void start_watchdog(NSString *jobId, SWJob *job) {
           if (terminationError == ESRCH) break;
         }
       }
-      usleep(10000);
+      usleep(5000);
     }
     (void)jobId;
   });
@@ -411,6 +417,23 @@ static void handle_launch(xpc_object_t request) {
   job.outputRoot = output;
   job.diagnosticFd = stderrPipe[1];
   dispatch_sync(jobsQueue, ^{ jobs[jobId] = job; });
+  // The suspended process cannot outrun a monitor that is already scheduled.
+  // Do not hand launch authority to the broker until the watchdog is live.
+  start_watchdog(jobId, job);
+  for (unsigned attempt = 0; attempt < 1000 && !job.watchdogReady; attempt++)
+    usleep(1000);
+  if (!job.watchdogReady) {
+    job.completed = YES;
+    kill(-pid, SIGKILL);
+    waitpid(pid, NULL, 0);
+    close(job.diagnosticFd);
+    job.diagnosticFd = -1;
+    close(stdoutPipe[0]);
+    close(stderrPipe[0]);
+    dispatch_sync(jobsQueue, ^{ [jobs removeObjectForKey:jobId]; });
+    reply_error(request, "XPC resource watchdog did not become ready");
+    return;
+  }
   xpc_object_t reply = xpc_dictionary_create_reply(request);
   xpc_dictionary_set_string(reply, "jobId", jobId.UTF8String);
   xpc_dictionary_set_int64(reply, "pid", pid);
@@ -442,7 +465,7 @@ static void handle_control(xpc_object_t request, NSString *operation) {
   }
   if ([operation isEqualToString:@"resume"]) {
     @synchronized(job) {
-      if (job.watchdogStarted) {
+      if (job.resumed) {
         reply_error(request, "XPC compiler process was already resumed");
         return;
       }
@@ -450,9 +473,8 @@ static void handle_control(xpc_object_t request, NSString *operation) {
         reply_error(request, "cannot resume XPC job");
         return;
       }
-      job.watchdogStarted = YES;
+      job.resumed = YES;
     }
-    start_watchdog(jobId, job);
   } else if ([operation isEqualToString:@"terminate"]) {
     const char *reasonText = xpc_dictionary_get_string(request, "reason");
     NSString *reason = @"Setwright XPC broker terminated the process group";
