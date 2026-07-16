@@ -12,15 +12,20 @@ use crate::core::contracts::{
 };
 use crate::core::error::{AppError, AppResult};
 use crate::services::runtime::InstalledRuntime;
-use crate::services::sandbox::SandboxLaunchRequest;
+use crate::services::sandbox::{
+    SandboxBroker, SandboxLaunchRequest, SandboxProcessControl, SandboxReadiness,
+};
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::thread;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 const JOB_DIRECTORY: &str = "compile-jobs";
@@ -57,18 +62,10 @@ impl CanonicalProjectSnapshot {
     }
 }
 
-/// A process-tree handle installed by an OS-specific executor.
-///
-/// Implementations must terminate the complete descendant tree (Job Object,
-/// XPC service, or sandbox namespace), not just the immediate TeX process.
-pub trait ProcessTreeControl: Send + Sync {
-    fn terminate_tree(&self) -> AppResult<()>;
-}
-
 #[derive(Default)]
 struct CancellationState {
     cancelled: AtomicBool,
-    process_tree: Mutex<Option<Arc<dyn ProcessTreeControl>>>,
+    process_tree: Mutex<Option<Arc<dyn SandboxProcessControl>>>,
 }
 
 /// Cooperative cancellation plus a kill-the-complete-tree hook.
@@ -94,7 +91,7 @@ impl CompileCancellationToken {
 
     /// Attaches the platform's complete-process-tree control. If cancellation
     /// won the race, the newly attached tree is terminated immediately.
-    pub fn attach_process_tree(&self, tree: Arc<dyn ProcessTreeControl>) -> AppResult<()> {
+    pub fn attach_process_tree(&self, tree: Arc<dyn SandboxProcessControl>) -> AppResult<()> {
         let mut process_tree = self.state.process_tree.lock();
         if self.is_cancelled() {
             drop(process_tree);
@@ -199,6 +196,20 @@ pub trait CompileExecutor: Send + Sync {
     ) -> AppResult<ExecutorResult>;
 }
 
+impl<T> CompileExecutor for Arc<T>
+where
+    T: CompileExecutor + ?Sized,
+{
+    fn execute(
+        &self,
+        request: &ValidatedCompileRequest,
+        cancellation: &CompileCancellationToken,
+        output: &mut dyn CompileOutputSink,
+    ) -> AppResult<ExecutorResult> {
+        self.as_ref().execute(request, cancellation, output)
+    }
+}
+
 /// Safe production default. It owns no process API and can never spawn.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoCompileExecutor;
@@ -213,6 +224,221 @@ impl CompileExecutor for NoCompileExecutor {
         Err(AppError::CompileUnavailable {
             message: "no attested OS sandbox executor is installed".into(),
         })
+    }
+}
+
+/// Executes only through an attestation-bound sandbox broker and one exact
+/// verified runtime. Construction rejects a broker whose attestation does not
+/// cover the runtime, profile, and current platform.
+#[derive(Clone)]
+pub struct SandboxedCompileExecutor {
+    runtime: InstalledRuntime,
+    broker: Arc<dyn SandboxBroker>,
+}
+
+impl std::fmt::Debug for SandboxedCompileExecutor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SandboxedCompileExecutor")
+            .field("runtime_profile", &self.runtime.profile_id())
+            .field("runtime_manifest_sha256", &self.runtime.manifest_sha256())
+            .field("sandbox_readiness", &self.broker.readiness())
+            .finish()
+    }
+}
+
+impl SandboxedCompileExecutor {
+    pub fn new(runtime: InstalledRuntime, broker: Arc<dyn SandboxBroker>) -> AppResult<Self> {
+        match broker.readiness() {
+            SandboxReadiness::Attested {
+                backend: _,
+                profile_id,
+                runtime_manifest_sha256,
+                ..
+            } if profile_id == runtime.profile_id()
+                && runtime_manifest_sha256 == runtime.manifest_sha256() =>
+            {
+                Ok(Self { runtime, broker })
+            }
+            SandboxReadiness::Attested { .. } => Err(AppError::CompileUnavailable {
+                message: "sandbox attestation does not cover the verified runtime installation"
+                    .into(),
+            }),
+            SandboxReadiness::Unavailable { reason, .. } => {
+                Err(AppError::CompileUnavailable { message: reason })
+            }
+        }
+    }
+}
+
+impl CompileExecutor for SandboxedCompileExecutor {
+    fn execute(
+        &self,
+        request: &ValidatedCompileRequest,
+        cancellation: &CompileCancellationToken,
+        output: &mut dyn CompileOutputSink,
+    ) -> AppResult<ExecutorResult> {
+        let launch_request = request.sandbox_launch_request(&self.runtime)?;
+        let child = self.broker.launch(&launch_request)?;
+        if child.receipt().job_id != request.job.job_id {
+            let _ = child.control().terminate_tree();
+            return Err(AppError::CompileUnavailable {
+                message: "sandbox broker returned a receipt for a different compile job".into(),
+            });
+        }
+
+        let control = child.control();
+        cancellation.attach_process_tree(Arc::clone(&control))?;
+        if cancellation.is_cancelled() {
+            return Err(compile_cancelled());
+        }
+        if let Err(error) = child.resume() {
+            let _ = control.terminate_tree();
+            return Err(error);
+        }
+
+        let status = drain_controlled_child(
+            child,
+            cancellation,
+            output,
+            request.job.spec.limits.timeout(),
+        )?;
+        if cancellation.is_cancelled() {
+            return Err(compile_cancelled());
+        }
+        let artifacts = collect_executor_artifacts(request, &self.runtime)?;
+        Ok(ExecutorResult {
+            success: status.success && artifacts.pdf.is_some(),
+            exit_code: status.exit_code,
+            artifacts,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum OutputStream {
+    Stdout,
+    Stderr,
+}
+
+enum ChildEvent {
+    Output(OutputStream, Vec<u8>),
+    StreamClosed(OutputStream),
+    Failed(OutputStream, io::Error),
+    Exited(AppResult<crate::services::sandbox::SandboxExitStatus>),
+}
+
+fn spawn_output_drain(
+    stream: OutputStream,
+    mut reader: Box<dyn Read + Send>,
+    sender: SyncSender<ChildEvent>,
+) {
+    thread::spawn(move || {
+        let mut buffer = [0_u8; 16 * 1024];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => {
+                    let _ = sender.send(ChildEvent::StreamClosed(stream));
+                    return;
+                }
+                Ok(read) => {
+                    if sender
+                        .send(ChildEvent::Output(stream, buffer[..read].to_vec()))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    let _ = sender.send(ChildEvent::Failed(stream, error));
+                    return;
+                }
+            }
+        }
+    });
+}
+
+fn drain_controlled_child(
+    child: crate::services::sandbox::ControlledSandboxChild,
+    cancellation: &CompileCancellationToken,
+    output: &mut dyn CompileOutputSink,
+    timeout: Duration,
+) -> AppResult<crate::services::sandbox::SandboxExitStatus> {
+    let control = child.control();
+    let (stdout, stderr, waiter) = child.into_io();
+    let (sender, receiver) = mpsc::sync_channel(32);
+    spawn_output_drain(OutputStream::Stdout, stdout, sender.clone());
+    spawn_output_drain(OutputStream::Stderr, stderr, sender.clone());
+    thread::spawn(move || {
+        let _ = sender.send(ChildEvent::Exited(waiter.wait()));
+    });
+
+    let deadline = Instant::now() + timeout;
+    let mut termination_deadline = None;
+    let mut stdout_closed = false;
+    let mut stderr_closed = false;
+    let mut exit_status = None;
+    let mut timed_out = false;
+
+    while !stdout_closed || !stderr_closed || exit_status.is_none() {
+        if cancellation.is_cancelled() && termination_deadline.is_none() {
+            termination_deadline = Some(Instant::now() + Duration::from_secs(5));
+        }
+        if !timed_out && Instant::now() >= deadline {
+            timed_out = true;
+            control.terminate_tree()?;
+            termination_deadline = Some(Instant::now() + Duration::from_secs(5));
+        }
+        if termination_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(AppError::CompileUnavailable {
+                message: "sandboxed compiler did not exit after process-tree termination".into(),
+            });
+        }
+
+        match receive_child_event(&receiver)? {
+            Some(ChildEvent::Output(OutputStream::Stdout, bytes)) => output.stdout(&bytes)?,
+            Some(ChildEvent::Output(OutputStream::Stderr, bytes)) => output.stderr(&bytes)?,
+            Some(ChildEvent::StreamClosed(OutputStream::Stdout)) => stdout_closed = true,
+            Some(ChildEvent::StreamClosed(OutputStream::Stderr)) => stderr_closed = true,
+            Some(ChildEvent::Failed(stream, error)) => {
+                let _ = control.terminate_tree();
+                return Err(AppError::CompileUnavailable {
+                    message: format!("could not drain sandbox {stream:?}: {error}"),
+                });
+            }
+            Some(ChildEvent::Exited(status)) => exit_status = Some(status?),
+            None => {}
+        }
+    }
+
+    if timed_out {
+        return Err(AppError::CompileUnavailable {
+            message: format!("sandboxed compiler exceeded its {timeout:?} wall-clock limit"),
+        });
+    }
+    let exit_status = exit_status.ok_or(AppError::CompileUnavailable {
+        message: "sandboxed compiler exited without a status".into(),
+    })?;
+    // The initial process can exit after detaching a child that closed the
+    // inherited streams. Seal that escape before inspecting attacker-owned
+    // output names or bytes.
+    control.terminate_tree()?;
+    Ok(exit_status)
+}
+
+fn receive_child_event(receiver: &Receiver<ChildEvent>) -> AppResult<Option<ChildEvent>> {
+    match receiver.recv_timeout(Duration::from_millis(50)) {
+        Ok(event) => Ok(Some(event)),
+        Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(AppError::CompileUnavailable {
+            message: "sandbox output and wait channels disconnected before completion".into(),
+        }),
+    }
+}
+
+fn compile_cancelled() -> AppError {
+    AppError::CompileUnavailable {
+        message: "the sandboxed compile was cancelled".into(),
     }
 }
 
@@ -350,16 +576,37 @@ pub enum CompletionOutcome {
 
 /// Per-project compile scheduler with one active job and one coalesced pending
 /// job per session.
-#[derive(Debug)]
-pub struct CompileScheduler<E = NoCompileExecutor> {
+pub struct CompileScheduler<E = Arc<dyn CompileExecutor>> {
     staging_root: PathBuf,
     executor: E,
     sessions: HashMap<ProjectSessionId, SessionCompileState>,
 }
 
-impl CompileScheduler<NoCompileExecutor> {
+impl<E> std::fmt::Debug for CompileScheduler<E> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CompileScheduler")
+            .field("staging_root", &self.staging_root)
+            .field("session_count", &self.sessions.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl CompileScheduler<Arc<dyn CompileExecutor>> {
     pub fn fail_closed(app_data_root: impl AsRef<Path>) -> AppResult<Self> {
-        Self::new(app_data_root, NoCompileExecutor)
+        Self::new(app_data_root, Arc::new(NoCompileExecutor))
+    }
+
+    pub fn with_executor(
+        app_data_root: impl AsRef<Path>,
+        executor: Arc<dyn CompileExecutor>,
+    ) -> AppResult<Self> {
+        Self::new(app_data_root, executor)
+    }
+
+    #[must_use]
+    pub fn executor_handle(&self) -> Arc<dyn CompileExecutor> {
+        Arc::clone(&self.executor)
     }
 }
 
@@ -815,7 +1062,7 @@ where
 #[must_use]
 pub fn execute_compile<E>(executor: &E, lease: &CompileLease) -> ExecutedCompile
 where
-    E: CompileExecutor,
+    E: CompileExecutor + ?Sized,
 {
     let limit = lease.request.job.spec.limits.display_log_bytes;
     let mut collector =
@@ -842,6 +1089,312 @@ where
         display_log_truncated,
         technical_log_path,
     }
+}
+
+/// Completes a deliberately cancelled staging lease without consulting the
+/// configured executor. Static preflight uses this to clean up its isolated
+/// scan stage while preserving the scheduler's normal completion lifecycle.
+#[must_use]
+pub fn cancelled_compile(lease: &CompileLease) -> ExecutedCompile {
+    let limit = lease.request.job.spec.limits.display_log_bytes;
+    let mut collector =
+        match PersistentOutputCollector::new(lease.request.technical_log_path.clone(), limit) {
+            Ok(collector) => collector,
+            Err(error) => {
+                return ExecutedCompile {
+                    result: Err(error),
+                    display_log: String::new(),
+                    display_log_truncated: false,
+                    technical_log_path: lease.request.technical_log_path.clone(),
+                };
+            }
+        };
+    let log_result = collector.flush_and_sync();
+    let (display_log, display_log_truncated, technical_log_path) = collector.finish();
+    ExecutedCompile {
+        result: match log_result {
+            Ok(()) => Err(compile_cancelled()),
+            Err(error) => Err(error),
+        },
+        display_log,
+        display_log_truncated,
+        technical_log_path,
+    }
+}
+
+fn collect_executor_artifacts(
+    request: &ValidatedCompileRequest,
+    runtime: &InstalledRuntime,
+) -> AppResult<ExecutorArtifacts> {
+    let output_root = fs::canonicalize(request.output_directory()).map_err(|error| {
+        AppError::io(
+            "canonicalize compile output directory",
+            request.output_directory(),
+            error,
+        )
+    })?;
+    if !output_root.starts_with(request.stage_directory()) {
+        return Err(AppError::PathOutsideRoot {
+            path: output_root.to_string_lossy().into_owned(),
+        });
+    }
+    let stem = Path::new(&request.job.spec.main_file)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+        .ok_or_else(|| AppError::InvalidPath {
+            path: request.job.spec.main_file.clone(),
+            message: "compile main file has no portable output stem".into(),
+        })?;
+    let pdf_name = format!("{stem}.pdf");
+    let synctex_name = format!("{stem}.synctex.gz");
+    let fls_name = format!("{stem}.fls");
+    let writable_limit = request.job.spec.limits.writable_bytes;
+    let mut total_bytes = 0_u64;
+    let mut pdf = None;
+    let mut synctex = None;
+    let mut fls = None;
+    let mut auxiliary_cache = BTreeMap::new();
+
+    let entries = fs::read_dir(&output_root)
+        .map_err(|error| AppError::io("read compile output directory", &output_root, error))?;
+    for entry in entries {
+        let entry = entry
+            .map_err(|error| AppError::io("read compile output entry", &output_root, error))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| AppError::io("inspect compile artifact type", &output_root, error))?;
+        if file_type.is_symlink() || !file_type.is_file() {
+            return Err(AppError::InvalidPath {
+                path: entry.path().to_string_lossy().into_owned(),
+                message: "compile output may contain only direct, regular files".into(),
+            });
+        }
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| AppError::InvalidPath {
+                path: output_root.to_string_lossy().into_owned(),
+                message: "compile artifact name is not portable UTF-8".into(),
+            })?;
+        let (path, file, metadata) = open_direct_artifact(&output_root, &name)?;
+        total_bytes = total_bytes.checked_add(metadata.len()).ok_or_else(|| {
+            AppError::CompileUnavailable {
+                message: "compile artifact byte count overflowed".into(),
+            }
+        })?;
+        if total_bytes > writable_limit || metadata.len() > writable_limit {
+            return Err(AppError::CompileUnavailable {
+                message: "compile artifacts exceed the sandbox writable-output limit".into(),
+            });
+        }
+
+        let retained = if name == pdf_name
+            || name == synctex_name
+            || name == fls_name
+            || approved_auxiliary_name(&name)
+        {
+            Some(read_bounded_artifact(
+                file,
+                &path,
+                metadata.len(),
+                writable_limit,
+            )?)
+        } else if ignored_compile_output(&name, stem) {
+            None
+        } else {
+            return Err(AppError::CompileUnavailable {
+                message: format!("sandbox produced an unapproved artifact: {name}"),
+            });
+        };
+
+        match (name.as_str(), retained) {
+            (name, Some(bytes)) if name == pdf_name => pdf = Some(bytes),
+            (name, Some(bytes)) if name == synctex_name => synctex = Some(bytes),
+            (name, Some(bytes)) if name == fls_name => fls = Some(bytes),
+            (name, Some(bytes)) => {
+                auxiliary_cache.insert(name.to_owned(), bytes);
+            }
+            (_, None) => {}
+        }
+    }
+
+    let dependencies = match fls {
+        Some(bytes) => parse_fls_dependencies(&bytes, request, runtime)?,
+        None => Vec::new(),
+    };
+    Ok(ExecutorArtifacts {
+        pdf,
+        synctex,
+        dependencies,
+        auxiliary_cache,
+    })
+}
+
+fn open_direct_artifact(
+    output_root: &Path,
+    name: &str,
+) -> AppResult<(PathBuf, File, fs::Metadata)> {
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\\') {
+        return Err(AppError::PathOutsideRoot { path: name.into() });
+    }
+    let relative = validated_portable_relative_path(name)?;
+    if relative.components().count() != 1 {
+        return Err(AppError::PathOutsideRoot { path: name.into() });
+    }
+    let candidate = output_root.join(relative);
+    let canonical = fs::canonicalize(&candidate)
+        .map_err(|error| AppError::io("canonicalize compile artifact", &candidate, error))?;
+    if canonical.parent() != Some(output_root) {
+        return Err(AppError::PathOutsideRoot {
+            path: canonical.to_string_lossy().into_owned(),
+        });
+    }
+    let file = open_artifact_no_follow(&canonical)
+        .map_err(|error| AppError::io("open compile artifact", &canonical, error))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| AppError::io("inspect open compile artifact", &canonical, error))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(AppError::InvalidPath {
+            path: canonical.to_string_lossy().into_owned(),
+            message: "compile output may contain only direct, regular files".into(),
+        });
+    }
+    Ok((canonical, file, metadata))
+}
+
+#[cfg(unix)]
+fn open_artifact_no_follow(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn open_artifact_no_follow(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+fn read_bounded_artifact(
+    file: File,
+    path: &Path,
+    expected_len: u64,
+    limit: u64,
+) -> AppResult<Vec<u8>> {
+    if expected_len > limit || expected_len > usize::MAX as u64 {
+        return Err(AppError::CompileUnavailable {
+            message: format!(
+                "compile artifact exceeds its byte limit: {}",
+                path.display()
+            ),
+        });
+    }
+    let mut bytes = Vec::with_capacity(expected_len as usize);
+    file.take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| AppError::io("read compile artifact", path, error))?;
+    if bytes.len() as u64 != expected_len || bytes.len() as u64 > limit {
+        return Err(AppError::CompileUnavailable {
+            message: format!(
+                "compile artifact changed size while it was being collected: {}",
+                path.display()
+            ),
+        });
+    }
+    Ok(bytes)
+}
+
+fn approved_auxiliary_name(name: &str) -> bool {
+    [".aux", ".bbl", ".bcf", ".run.xml"]
+        .iter()
+        .any(|suffix| name.ends_with(suffix))
+}
+
+fn ignored_compile_output(name: &str, stem: &str) -> bool {
+    [
+        format!("{stem}.log"),
+        format!("{stem}.fdb_latexmk"),
+        format!("{stem}.fls"),
+        format!("{stem}.blg"),
+        format!("{stem}.toc"),
+        format!("{stem}.out"),
+        format!("{stem}.lof"),
+        format!("{stem}.lot"),
+    ]
+    .iter()
+    .any(|allowed| allowed == name)
+}
+
+fn parse_fls_dependencies(
+    bytes: &[u8],
+    request: &ValidatedCompileRequest,
+    runtime: &InstalledRuntime,
+) -> AppResult<Vec<String>> {
+    let stage = fs::canonicalize(request.stage_directory()).map_err(|error| {
+        AppError::io(
+            "canonicalize compile stage for recorder parsing",
+            request.stage_directory(),
+            error,
+        )
+    })?;
+    let output = fs::canonicalize(request.output_directory()).map_err(|error| {
+        AppError::io(
+            "canonicalize compile output for recorder parsing",
+            request.output_directory(),
+            error,
+        )
+    })?;
+    let runtime_root = fs::canonicalize(runtime.root()).map_err(|error| {
+        AppError::io(
+            "canonicalize runtime for recorder parsing",
+            runtime.root(),
+            error,
+        )
+    })?;
+    let text = std::str::from_utf8(bytes).map_err(|_| AppError::CompileUnavailable {
+        message: "TeX recorder output is not valid UTF-8".into(),
+    })?;
+    let mut dependencies = BTreeSet::new();
+    for raw in text.lines().filter_map(|line| line.strip_prefix("INPUT ")) {
+        let normalized = raw.replace('\\', "/");
+        if normalized == "/runtime" || normalized.starts_with("/runtime/") {
+            continue;
+        }
+        let candidate = if let Some(relative) = normalized.strip_prefix("/work/") {
+            stage.join(validated_portable_relative_path(relative)?)
+        } else {
+            let path = PathBuf::from(raw);
+            if path.is_absolute() {
+                path
+            } else {
+                stage.join(path)
+            }
+        };
+        let canonical = fs::canonicalize(&candidate)
+            .map_err(|error| AppError::io("canonicalize TeX recorder input", &candidate, error))?;
+        if canonical.starts_with(&runtime_root) || canonical.starts_with(&output) {
+            continue;
+        }
+        let relative = canonical
+            .strip_prefix(&stage)
+            .map_err(|_| AppError::PathOutsideRoot {
+                path: canonical.to_string_lossy().into_owned(),
+            })?;
+        let portable = portable_path(relative);
+        validated_portable_relative_path(&portable)?;
+        dependencies.insert(portable);
+    }
+    Ok(dependencies.into_iter().collect())
 }
 
 fn validate_exact_spec(spec: &CompileSpec) -> AppResult<()> {
@@ -1339,6 +1892,12 @@ mod tests {
     use super::*;
     use crate::core::compile::SandboxBackend;
     use crate::core::contracts::LatexEngine;
+    use crate::services::sandbox::{
+        AttestedSandboxBroker, CommonSandboxProbeEvidence, LinuxBubblewrapEvidence,
+        MacosXpcEvidence, PlatformControlledProcess, PlatformLaunchHandle, PlatformSandboxLauncher,
+        SandboxExitStatus, SandboxExitWaiter, SandboxLaunchAuthorization, SandboxProbeEvidence,
+        WindowsAppContainerEvidence, current_sandbox_backend,
+    };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Debug, Clone)]
@@ -1366,11 +1925,186 @@ mod tests {
     #[derive(Debug)]
     struct CountingTree(Arc<AtomicUsize>);
 
-    impl ProcessTreeControl for CountingTree {
+    impl SandboxProcessControl for CountingTree {
+        fn resume(&self) -> AppResult<()> {
+            Ok(())
+        }
+
         fn terminate_tree(&self) -> AppResult<()> {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
+    }
+
+    struct ImmediateExit;
+
+    impl SandboxExitWaiter for ImmediateExit {
+        fn wait(self: Box<Self>) -> AppResult<SandboxExitStatus> {
+            Ok(SandboxExitStatus {
+                success: true,
+                exit_code: Some(0),
+            })
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct FixtureLauncher {
+        resumes: Arc<AtomicUsize>,
+        terminations: Arc<AtomicUsize>,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+        malicious_output_directory: bool,
+    }
+
+    impl PlatformSandboxLauncher for FixtureLauncher {
+        fn launch_attested(
+            &self,
+            authorization: &SandboxLaunchAuthorization,
+        ) -> AppResult<PlatformControlledProcess> {
+            let request = authorization.request();
+            let output = request.output_directory();
+            if self.malicious_output_directory {
+                fs::create_dir(output.join("escape.pdf")).unwrap();
+            } else {
+                fs::write(output.join("main.pdf"), b"%PDF-1.7\nfixture").unwrap();
+                fs::write(output.join("main.synctex.gz"), b"SyncTeX fixture").unwrap();
+                fs::write(output.join("main.aux"), b"auxiliary cache").unwrap();
+                fs::write(output.join("main.log"), b"full TeX log").unwrap();
+                fs::write(
+                    output.join("main.fls"),
+                    b"INPUT /work/main.tex\nINPUT /work/sections/body.tex\nINPUT /runtime/texmf.cnf\n",
+                )
+                .unwrap();
+            }
+            PlatformControlledProcess::new(
+                PlatformLaunchHandle {
+                    opaque_id: "fixture-child".into(),
+                },
+                Arc::new(FixtureControl {
+                    resumes: Arc::clone(&self.resumes),
+                    terminations: Arc::clone(&self.terminations),
+                }),
+                Box::new(std::io::Cursor::new(self.stdout.clone())),
+                Box::new(std::io::Cursor::new(self.stderr.clone())),
+                Box::new(ImmediateExit),
+            )
+        }
+    }
+
+    #[derive(Debug)]
+    struct FixtureControl {
+        resumes: Arc<AtomicUsize>,
+        terminations: Arc<AtomicUsize>,
+    }
+
+    impl SandboxProcessControl for FixtureControl {
+        fn resume(&self) -> AppResult<()> {
+            self.resumes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn terminate_tree(&self) -> AppResult<()> {
+            self.terminations.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn sandbox_evidence() -> SandboxProbeEvidence {
+        let common = CommonSandboxProbeEvidence {
+            schema_version: 1,
+            policy_version: 1,
+            profile_id: "texlive-2025.2025-08-03".into(),
+            runtime_manifest_sha256: "a".repeat(64),
+            broker_build_sha256: "b".repeat(64),
+            probed_at: chrono::Utc::now(),
+            sandbox_started: true,
+            runtime_read_only: true,
+            staged_project_only: true,
+            empty_home_and_config: true,
+            outside_canary_denied: true,
+            dns_denied: true,
+            http_denied: true,
+            shell_escape_denied: true,
+            latexmkrc_ignored: true,
+            process_tree_killed: true,
+            memory_limit_enforced: true,
+            writable_limit_enforced: true,
+            child_limit_enforced: true,
+            pdflatex_passed: true,
+            xelatex_passed: true,
+            bibtex_passed: true,
+            biber_passed: true,
+            synctex_passed: true,
+        };
+        match current_sandbox_backend().unwrap() {
+            SandboxBackend::WindowsAppContainer => {
+                SandboxProbeEvidence::WindowsAppContainer(WindowsAppContainerEvidence {
+                    common,
+                    appcontainer_sid: "S-1-15-2-fixture".into(),
+                    restricted_token: true,
+                    zero_network_capabilities: true,
+                    runtime_acl_read_only: true,
+                    stage_acl_scoped: true,
+                    job_object_kill_on_close: true,
+                    job_object_limits: true,
+                })
+            }
+            SandboxBackend::MacosXpcAppSandbox => {
+                SandboxProbeEvidence::MacosXpcAppSandbox(MacosXpcEvidence {
+                    common,
+                    service_code_requirement: "anchor apple generic".into(),
+                    app_sandbox_enabled: true,
+                    network_entitlement_absent: true,
+                    app_group_stage_only: true,
+                    xpc_peer_requirement_enforced: true,
+                    process_limits_enforced: true,
+                })
+            }
+            SandboxBackend::LinuxBubblewrap => {
+                SandboxProbeEvidence::LinuxBubblewrap(LinuxBubblewrapEvidence {
+                    common,
+                    bubblewrap_sha256: "c".repeat(64),
+                    user_namespace: true,
+                    mount_namespace: true,
+                    pid_namespace: true,
+                    ipc_namespace: true,
+                    network_namespace: true,
+                    capabilities_dropped: true,
+                    no_new_privileges: true,
+                    seccomp_filter: true,
+                    rlimits_enforced: true,
+                })
+            }
+        }
+    }
+
+    fn sandbox_executor(root: &Path, launcher: FixtureLauncher) -> SandboxedCompileExecutor {
+        let runtime_root = root.join("runtime");
+        fs::create_dir(&runtime_root).unwrap();
+        let runtime =
+            InstalledRuntime::fixture("texlive-2025.2025-08-03", runtime_root, "a".repeat(64));
+        let broker: Arc<dyn SandboxBroker> =
+            Arc::new(AttestedSandboxBroker::new(sandbox_evidence(), launcher).unwrap());
+        SandboxedCompileExecutor::new(runtime, broker).unwrap()
+    }
+
+    fn sandbox_snapshot(session: ProjectSessionId) -> CanonicalProjectSnapshot {
+        let spec = CompileSpec::preview(
+            "texlive-2025.2025-08-03",
+            LatexEngine::PdfLatex,
+            Path::new("main.tex"),
+            current_sandbox_backend().unwrap(),
+        )
+        .unwrap();
+        CanonicalProjectSnapshot::new(
+            session,
+            Revision(1),
+            spec,
+            BTreeMap::from([
+                ("main.tex".into(), b"\\input{sections/body}\n".to_vec()),
+                ("sections/body.tex".into(), b"fixture body\n".to_vec()),
+            ]),
+        )
     }
 
     fn spec() -> CompileSpec {
@@ -1583,6 +2317,128 @@ mod tests {
         let full = fs::read(path).unwrap();
         assert!(full.ends_with(b"7890"));
         assert!(full.len() > display.len());
+    }
+
+    #[test]
+    fn sandbox_executor_drains_both_streams_and_normalizes_fls_dependencies() {
+        let directory = tempfile::tempdir().unwrap();
+        let resumes = Arc::new(AtomicUsize::new(0));
+        let terminations = Arc::new(AtomicUsize::new(0));
+        let stdout = vec![b'o'; 512 * 1024];
+        let stderr = vec![b'e'; 512 * 1024];
+        let executor = sandbox_executor(
+            directory.path(),
+            FixtureLauncher {
+                resumes: Arc::clone(&resumes),
+                terminations: Arc::clone(&terminations),
+                stdout: stdout.clone(),
+                stderr: stderr.clone(),
+                malicious_output_directory: false,
+            },
+        );
+        let mut scheduler =
+            CompileScheduler::new(directory.path().join("app-data"), executor).unwrap();
+        let session = ProjectSessionId::new();
+        scheduler.queue(sandbox_snapshot(session)).unwrap();
+        let lease = scheduler.begin_next(session).unwrap().unwrap();
+        let executed = scheduler.execute(&lease);
+        let technical_log = fs::read(executed.technical_log_path()).unwrap();
+        assert!(technical_log.len() >= stdout.len() + stderr.len());
+        assert!(technical_log.iter().filter(|byte| **byte == b'o').count() >= stdout.len());
+        assert!(technical_log.iter().filter(|byte| **byte == b'e').count() >= stderr.len());
+
+        let completion = scheduler.complete(&lease, executed, Revision(1)).unwrap();
+        let CompletionOutcome::Published(publication) = completion else {
+            panic!("sandbox fixture compile was not published");
+        };
+        assert_eq!(
+            publication.dependencies,
+            vec!["main.tex".to_owned(), "sections/body.tex".to_owned()]
+        );
+        assert_eq!(publication.auxiliary_cache["main.aux"], b"auxiliary cache");
+        assert_eq!(resumes.load(Ordering::SeqCst), 1);
+        assert_eq!(terminations.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cancellation_wins_before_resume_and_terminates_the_controlled_tree() {
+        let directory = tempfile::tempdir().unwrap();
+        let resumes = Arc::new(AtomicUsize::new(0));
+        let terminations = Arc::new(AtomicUsize::new(0));
+        let executor = sandbox_executor(
+            directory.path(),
+            FixtureLauncher {
+                resumes: Arc::clone(&resumes),
+                terminations: Arc::clone(&terminations),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                malicious_output_directory: false,
+            },
+        );
+        let mut scheduler =
+            CompileScheduler::new(directory.path().join("app-data"), executor).unwrap();
+        let session = ProjectSessionId::new();
+        scheduler.queue(sandbox_snapshot(session)).unwrap();
+        let lease = scheduler.begin_next(session).unwrap().unwrap();
+        lease.cancellation().cancel().unwrap();
+        let executed = scheduler.execute(&lease);
+        assert!(matches!(
+            scheduler.complete(&lease, executed, Revision(1)).unwrap(),
+            CompletionOutcome::Cancelled { .. }
+        ));
+        assert_eq!(resumes.load(Ordering::SeqCst), 0);
+        assert_eq!(terminations.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn sandbox_executor_rejects_non_file_artifacts() {
+        let directory = tempfile::tempdir().unwrap();
+        let executor = sandbox_executor(
+            directory.path(),
+            FixtureLauncher {
+                resumes: Arc::new(AtomicUsize::new(0)),
+                terminations: Arc::new(AtomicUsize::new(0)),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                malicious_output_directory: true,
+            },
+        );
+        let mut scheduler =
+            CompileScheduler::new(directory.path().join("app-data"), executor).unwrap();
+        let session = ProjectSessionId::new();
+        scheduler.queue(sandbox_snapshot(session)).unwrap();
+        let lease = scheduler.begin_next(session).unwrap().unwrap();
+        let executed = scheduler.execute(&lease);
+        let completion = scheduler.complete(&lease, executed, Revision(1)).unwrap();
+        let CompletionOutcome::Failed { error, .. } = completion else {
+            panic!("malicious artifact was accepted");
+        };
+        assert!(error.to_string().contains("direct, regular files"));
+    }
+
+    #[test]
+    fn artifact_collection_rejects_path_components_before_opening() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("output");
+        fs::create_dir(&output).unwrap();
+
+        for name in [
+            "",
+            ".",
+            "..",
+            "../outside.pdf",
+            "nested/main.pdf",
+            "nested\\main.pdf",
+            "C:outside.pdf",
+        ] {
+            assert!(
+                matches!(
+                    open_direct_artifact(&output, name),
+                    Err(AppError::PathOutsideRoot { .. })
+                ),
+                "artifact path was not rejected before access: {name:?}"
+            );
+        }
     }
 
     #[test]

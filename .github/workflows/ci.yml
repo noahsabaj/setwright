@@ -103,6 +103,244 @@ jobs:
           cargo run --manifest-path src-tauri/Cargo.toml --bin export_bindings
           git diff --exit-code -- src/lib/bindings.ts
 
+  sandbox-containment:
+    name: Sandbox containment (${{ matrix.os }})
+    needs: frontend
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-22.04
+          - windows-2022
+          - macos-14
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Restore the verified frontend
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: frontend-dist
+          path: dist
+      - name: Install Linux containment build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf meson libcap-dev libseccomp-dev musl-tools
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: 1.95.0
+      - name: Install static Linux fixture target
+        if: runner.os == 'Linux'
+        run: rustup target add x86_64-unknown-linux-musl
+      - name: Build pinned bubblewrap and seccomp policy
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/setwright-bwrap"
+          git -C "$RUNNER_TEMP/setwright-bwrap" init
+          git -C "$RUNNER_TEMP/setwright-bwrap" remote add origin https://github.com/containers/bubblewrap.git
+          git -C "$RUNNER_TEMP/setwright-bwrap" fetch --depth 1 origin refs/tags/v0.11.0
+          git -C "$RUNNER_TEMP/setwright-bwrap" checkout --detach 9ca3b05ec787acfb4b17bed37db5719fa777834f
+          test "$(git -C "$RUNNER_TEMP/setwright-bwrap" rev-parse HEAD)" = 9ca3b05ec787acfb4b17bed37db5719fa777834f
+          meson setup "$RUNNER_TEMP/setwright-bwrap/build" "$RUNNER_TEMP/setwright-bwrap" \
+            -Dselinux=disabled -Dtests=false -Dman=disabled \
+            -Dbash_completion=disabled -Dzsh_completion=disabled
+          meson compile -C "$RUNNER_TEMP/setwright-bwrap/build" bwrap
+          cc tools/sandbox/linux_seccomp_filter.c -lseccomp -o "$RUNNER_TEMP/make-setwright-seccomp"
+          "$RUNNER_TEMP/make-setwright-seccomp" "$RUNNER_TEMP/setwright-seccomp.bpf"
+          "$RUNNER_TEMP/setwright-bwrap/build/bwrap" --version
+          sha256sum "$RUNNER_TEMP/setwright-bwrap/build/bwrap" "$RUNNER_TEMP/setwright-seccomp.bpf"
+      - name: Build static Linux hostile helper
+        if: runner.os == 'Linux'
+        run: cargo build --locked --manifest-path tools/sandbox/hostile-fixture/Cargo.toml --target x86_64-unknown-linux-musl
+      - name: Assemble test-signed macOS XPC host
+        if: runner.os == 'macOS'
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --manifest-path src-tauri/Cargo.toml --bin sandbox-hostile-fixture
+          cargo test --manifest-path src-tauri/Cargo.toml --test sandbox_containment --no-run
+          test_binary=$(find src-tauri/target/debug/deps -type f -name 'sandbox_containment-*' -perm -111 | head -n 1)
+          test -n "$test_binary"
+
+          app="$RUNNER_TEMP/SetwrightContainment.app"
+          service="$app/Contents/XPCServices/SetwrightCompilerXPC.xpc"
+          runtime_root="$service/Contents/Resources/tex-runtime"
+          mkdir -p "$app/Contents/MacOS" \
+            "$service/Contents/MacOS" "$service/Contents/Resources"
+          cp src-tauri/native/macos/ContainmentHost-Info.plist "$app/Contents/Info.plist"
+          cp "$test_binary" "$app/Contents/MacOS/SetwrightContainment"
+          cp src-tauri/native/macos/SetwrightCompilerXPC/Info.plist "$service/Contents/Info.plist"
+
+          xcrun clang src-tauri/native/macos/SetwrightCompilerXPC/tex_launcher.c \
+            -o "$service/Contents/Resources/setwright-tex-launcher"
+
+          keychain="$RUNNER_TEMP/setwright-test-signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          signing_config=src-tauri/native/macos/SetwrightCompilerXPC/test-signing.cnf
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -subj '/CN=Setwright CI Test Root/O=Setwright/' \
+            -config "$signing_config" -extensions test_root \
+            -keyout "$RUNNER_TEMP/setwright-test-root.key" \
+            -out "$RUNNER_TEMP/setwright-test-root.crt"
+          root_sha1="$(openssl x509 -in "$RUNNER_TEMP/setwright-test-root.crt" \
+            -noout -fingerprint -sha1 | sed 's/^[^=]*=//;s/://g')"
+          test "${#root_sha1}" = 40
+          requirements_header="$RUNNER_TEMP/setwright-signing-requirements.h"
+          {
+            printf '#define SETWRIGHT_HOST_REQUIREMENT "certificate root = H\\"%s\\" and identifier \\"org.setwright.desktop\\""\n' "$root_sha1"
+            printf '#define SETWRIGHT_HELPER_REQUIREMENT "certificate root = H\\"%s\\" and entitlement[\\"com.apple.security.inherit\\"] exists"\n' "$root_sha1"
+          } > "$requirements_header"
+          printf -v host_requirement \
+            'certificate root = H"%s" and identifier "org.setwright.desktop"' \
+            "$root_sha1"
+          printf -v helper_requirement \
+            'certificate root = H"%s" and entitlement["com.apple.security.inherit"] exists' \
+            "$root_sha1"
+          printf -v service_requirement \
+            'certificate root = H"%s" and identifier "org.setwright.desktop.compiler-xpc"' \
+            "$root_sha1"
+          xcrun clang -fblocks -include "$requirements_header" \
+            src-tauri/native/macos/SetwrightCompilerXPC/service.m \
+            -framework Foundation -framework Security \
+            -o "$service/Contents/MacOS/SetwrightCompilerXPC"
+          openssl req -new -newkey rsa:2048 -nodes \
+            -subj '/CN=Setwright CI Test Signing/OU=SETWRIGHTCI/O=Setwright/' \
+            -keyout "$RUNNER_TEMP/setwright-test-signing.key" \
+            -out "$RUNNER_TEMP/setwright-test-signing.csr"
+          openssl x509 -req -days 1 -set_serial 1 \
+            -in "$RUNNER_TEMP/setwright-test-signing.csr" \
+            -CA "$RUNNER_TEMP/setwright-test-root.crt" \
+            -CAkey "$RUNNER_TEMP/setwright-test-root.key" \
+            -extfile "$signing_config" -extensions code_signing_leaf \
+            -out "$RUNNER_TEMP/setwright-test-signing.crt"
+          pkcs12_legacy=''
+          if openssl pkcs12 -help 2>&1 | grep -q -- '-legacy'; then
+            pkcs12_legacy='-legacy'
+          fi
+          openssl pkcs12 -export $pkcs12_legacy \
+            -inkey "$RUNNER_TEMP/setwright-test-signing.key" \
+            -in "$RUNNER_TEMP/setwright-test-signing.crt" \
+            -certfile "$RUNNER_TEMP/setwright-test-root.crt" \
+            -passout "pass:$keychain_password" \
+            -out "$RUNNER_TEMP/setwright-test-signing.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/setwright-test-signing.p12" \
+            -k "$keychain" -P "$keychain_password" -T /usr/bin/codesign
+          sudo -n security add-trusted-cert -d -r trustRoot \
+            -k /Library/Keychains/System.keychain \
+            "$RUNNER_TEMP/setwright-test-root.crt"
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain"
+          security default-keychain -d user -s "$keychain"
+          security find-identity -v -p codesigning "$keychain"
+          identity="$(security find-identity -v -p codesigning "$keychain" | \
+            awk '/Setwright CI Test Signing/ { print $2; exit }')"
+          test -n "$identity"
+
+          helper_entitlements=src-tauri/native/macos/SetwrightCompilerXPC/helper.entitlements
+          service_entitlements=src-tauri/native/macos/SetwrightCompilerXPC/service.entitlements
+          codesign --force --keychain "$keychain" --sign "$identity" \
+            --identifier org.setwright.desktop.tex-launcher \
+            --entitlements "$helper_entitlements" \
+            "$service/Contents/Resources/setwright-tex-launcher"
+          codesign --force --keychain "$keychain" --sign "$identity" \
+            --identifier org.setwright.hostile-fixture \
+            --entitlements "$helper_entitlements" \
+            src-tauri/target/debug/sandbox-hostile-fixture
+
+          SETWRIGHT_PREPARE_FIXTURE_RUNTIME=1 \
+          SETWRIGHT_XPC_RUNTIME_ROOT="$runtime_root" \
+          SETWRIGHT_HOSTILE_FIXTURE_PATH="$PWD/src-tauri/target/debug/sandbox-hostile-fixture" \
+            "$test_binary" native_hostile_fixture_containment_remains_incomplete_attestation --nocapture
+          codesign --force --keychain "$keychain" --sign "$identity" \
+            --identifier org.setwright.desktop.compiler-xpc \
+            --entitlements "$service_entitlements" "$service"
+          codesign --force --keychain "$keychain" --sign "$identity" \
+            --identifier org.setwright.desktop "$app"
+          codesign --verify --strict -R="$host_requirement" "$app"
+          codesign --verify --strict -R="$service_requirement" "$service"
+          codesign --verify --strict -R="$helper_requirement" \
+            "$service/Contents/Resources/setwright-tex-launcher"
+          codesign --verify --strict -R="$helper_requirement" \
+            "$runtime_root/texlive-2025.2025-08-03-macos-aarch64/bin/latexmk"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign --display --verbose=4 "$service"
+          codesign --display --entitlements - "$service"
+          codesign --verify --strict --verbose=2 "$service/Contents/Resources/setwright-tex-launcher"
+          codesign --display --verbose=4 "$service/Contents/Resources/setwright-tex-launcher"
+          codesign --display --entitlements - --requirements - "$service/Contents/Resources/setwright-tex-launcher"
+          codesign --verify --strict --verbose=2 "$runtime_root/texlive-2025.2025-08-03-macos-aarch64/bin/latexmk"
+          codesign --display --verbose=4 "$runtime_root/texlive-2025.2025-08-03-macos-aarch64/bin/latexmk"
+          codesign --display --entitlements - --requirements - "$runtime_root/texlive-2025.2025-08-03-macos-aarch64/bin/latexmk"
+
+          group_root="$HOME/Library/Group Containers/group.org.setwright.desktop"
+          stage_root="$group_root/compile-stages"
+          mkdir -p "$stage_root"
+          {
+            echo "SETWRIGHT_CONTAINMENT_APP=$app"
+            echo "SETWRIGHT_XPC_STAGE_ROOT=$stage_root"
+            echo "SETWRIGHT_XPC_RUNTIME_ROOT=$runtime_root"
+          } >> "$GITHUB_ENV"
+          printf 'SETWRIGHT_XPC_REQUIREMENT=%s\n' "$service_requirement" >> "$GITHUB_ENV"
+      - name: Run Windows AppContainer hostile fixture
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:SETWRIGHT_RUN_NATIVE_SANDBOX_PROBE = '1'
+          $env:SETWRIGHT_PROBE_EVIDENCE = Join-Path $env:RUNNER_TEMP 'sandbox-probe-windows.json'
+          cargo test --manifest-path src-tauri/Cargo.toml --test sandbox_containment native_hostile_fixture_containment_remains_incomplete_attestation -- --nocapture
+      - name: Run Linux bubblewrap hostile fixture
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export SETWRIGHT_RUN_NATIVE_SANDBOX_PROBE=1
+          export SETWRIGHT_BWRAP_PATH="$RUNNER_TEMP/setwright-bwrap/build/bwrap"
+          export SETWRIGHT_BWRAP_VERSION='bubblewrap 0.11.0'
+          export SETWRIGHT_BWRAP_SHA256="$(sha256sum "$SETWRIGHT_BWRAP_PATH" | cut -d' ' -f1)"
+          export SETWRIGHT_SECCOMP_PATH="$RUNNER_TEMP/setwright-seccomp.bpf"
+          export SETWRIGHT_SECCOMP_SHA256="$(sha256sum "$SETWRIGHT_SECCOMP_PATH" | cut -d' ' -f1)"
+          export SETWRIGHT_HOSTILE_FIXTURE_PATH="$PWD/tools/sandbox/hostile-fixture/target/x86_64-unknown-linux-musl/debug/sandbox-hostile-fixture"
+          export SETWRIGHT_PROBE_EVIDENCE="$RUNNER_TEMP/sandbox-probe-linux.json"
+          cargo test --manifest-path src-tauri/Cargo.toml --test sandbox_containment native_hostile_fixture_containment_remains_incomplete_attestation -- --nocapture
+      - name: Run macOS XPC hostile fixture
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export SETWRIGHT_RUN_NATIVE_SANDBOX_PROBE=1
+          export SETWRIGHT_XPC_BUNDLE="$SETWRIGHT_CONTAINMENT_APP/Contents/XPCServices/SetwrightCompilerXPC.xpc"
+          export SETWRIGHT_XPC_SERVICE_NAME='org.setwright.desktop.compiler-xpc'
+          export SETWRIGHT_XPC_APP_GROUP='group.org.setwright.desktop'
+          export SETWRIGHT_USE_PREINSTALLED_RUNTIME=1
+          export SETWRIGHT_HOSTILE_FIXTURE_PATH="$PWD/src-tauri/target/debug/sandbox-hostile-fixture"
+          export SETWRIGHT_PROBE_EVIDENCE="$RUNNER_TEMP/sandbox-probe-macos.json"
+          "$SETWRIGHT_CONTAINMENT_APP/Contents/MacOS/SetwrightContainment" \
+            native_hostile_fixture_containment_remains_incomplete_attestation --nocapture
+      - name: Diagnose macOS sandbox failure
+        if: failure() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          /usr/bin/log show --last 5m --style compact \
+            --predicate 'process == "SetwrightCompilerXPC" OR process == "setwright-tex-launcher" OR process == "sandbox-hostile-fixture" OR eventMessage CONTAINS[c] "SetwrightContainment"' \
+            || true
+      - name: Upload containment-only probe evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sandbox-probe-${{ matrix.os }}
+          path: ${{ runner.temp }}/sandbox-probe-*.json
+          if-no-files-found: error
+          retention-days: 14
+
   schemas:
     name: Public schema examples
     runs-on: ubuntu-22.04

@@ -23,9 +23,10 @@ use crate::services::citations::{
     plan_delete_entry, plan_upsert_entry, search_bibliography,
 };
 use crate::services::compiler::{
-    CanonicalProjectSnapshot, CompileLease, CompileScheduler, CompletionOutcome, NoCompileExecutor,
-    QueueOutcome, execute_compile,
+    CanonicalProjectSnapshot, CompileExecutor, CompileLease, CompileScheduler, CompletionOutcome,
+    QueueOutcome, SandboxedCompileExecutor, cancelled_compile, execute_compile,
 };
+use crate::services::runtime::InstalledRuntime;
 use crate::services::sandbox::{FailClosedSandboxBroker, SandboxBroker, SandboxReadiness};
 use crate::services::storage::{
     DurableHistory, SnapshotKind, SnapshotRecord, StorageLimits, excluded_history_path,
@@ -37,6 +38,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use tauri::{Manager, State, Window};
 use tauri_plugin_fs::FsExt;
 use tauri_specta::Event as _;
@@ -61,14 +63,13 @@ struct SessionContext {
 /// Process state deliberately contains no globally-addressable current
 /// project. A command must present both a session ID and the native window that
 /// owns it.
-#[derive(Debug)]
 pub struct DesktopState {
     registry: ProjectRegistry,
     contexts: RwLock<HashMap<ProjectSessionId, SessionContext>>,
     history: DurableHistory,
     citation_lookup: CitationLookupService,
-    sandbox_broker: FailClosedSandboxBroker,
-    compiler: Mutex<CompileScheduler<NoCompileExecutor>>,
+    sandbox_broker: Arc<dyn SandboxBroker>,
+    compiler: Mutex<CompileScheduler>,
     automatic_compile_generations: RwLock<HashMap<ProjectSessionId, u64>>,
     snapshot_generations: RwLock<HashMap<ProjectSessionId, u64>>,
     last_automatic_snapshots: RwLock<HashMap<String, chrono::DateTime<Utc>>>,
@@ -96,13 +97,22 @@ impl DesktopState {
             CitationLookupService::new().map_err(|error| AppError::InvalidProject {
                 message: format!("could not initialize citation metadata broker: {error}"),
             })?;
-        let compiler = CompileScheduler::fail_closed(app_data_directory.join("compiler"))?;
+        let sandbox_broker: Arc<dyn SandboxBroker> = Arc::new(FailClosedSandboxBroker::default());
+        // Genuine runtime signing keys and packaged probe evidence are not yet
+        // configured. The selector is nevertheless executable: when startup
+        // eventually supplies both private-field trust tokens, it installs the
+        // sandbox executor; every absent/mismatched state retains NoCompile.
+        let compiler = select_startup_compile_scheduler(
+            app_data_directory.join("compiler"),
+            None,
+            Arc::clone(&sandbox_broker),
+        )?;
         Ok(Self {
             registry: ProjectRegistry::new(),
             contexts: RwLock::new(HashMap::new()),
             history,
             citation_lookup,
-            sandbox_broker: FailClosedSandboxBroker::default(),
+            sandbox_broker,
             compiler: Mutex::new(compiler),
             automatic_compile_generations: RwLock::new(HashMap::new()),
             snapshot_generations: RwLock::new(HashMap::new()),
@@ -313,6 +323,20 @@ impl DesktopState {
             }
         });
     }
+}
+
+fn select_startup_compile_scheduler(
+    compiler_root: impl AsRef<Path>,
+    runtime: Option<InstalledRuntime>,
+    broker: Arc<dyn SandboxBroker>,
+) -> AppResult<CompileScheduler> {
+    if let Some(runtime) = runtime
+        && let Ok(executor) = SandboxedCompileExecutor::new(runtime, broker)
+    {
+        let executor: Arc<dyn CompileExecutor> = Arc::new(executor);
+        return CompileScheduler::with_executor(compiler_root, executor);
+    }
+    CompileScheduler::fail_closed(compiler_root)
 }
 
 #[derive(specta::Type, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1360,8 +1384,14 @@ fn spawn_compile_worker(
             let job_id = lease.request().job().job_id;
             let job_revision = lease.request().job().revision;
             let execution_lease = lease.clone();
+            let executor = app_handle
+                .state::<DesktopState>()
+                .compiler
+                .lock()
+                .executor_handle();
+            let blocking_executor = Arc::clone(&executor);
             let executed = tauri::async_runtime::spawn_blocking(move || {
-                execute_compile(&NoCompileExecutor, &execution_lease)
+                execute_compile(blocking_executor.as_ref(), &execution_lease)
             })
             .await;
 
@@ -1371,7 +1401,7 @@ fn spawn_compile_worker(
                 Err(error) => {
                     worker_failure = Some(format!("compile worker failed: {error}"));
                     let _ = lease.cancellation().cancel();
-                    execute_compile(&NoCompileExecutor, &lease)
+                    execute_compile(executor.as_ref(), &lease)
                 }
             };
 
@@ -1425,7 +1455,7 @@ fn spawn_compile_worker(
 }
 
 fn compile_completion_events(
-    compiler: &CompileScheduler<NoCompileExecutor>,
+    compiler: &CompileScheduler,
     session_id: ProjectSessionId,
     completion: CompletionOutcome,
 ) -> Vec<CompileEvent> {
@@ -1594,7 +1624,8 @@ fn run_compile_for_owner(
     // A real attested executor may run for minutes. It must never borrow the
     // scheduler mutex: newer revisions and typed cancellation need to reach
     // the active process-tree token while execution is in progress.
-    let executed = execute_compile(&NoCompileExecutor, &lease);
+    let executor = state.compiler.lock().executor_handle();
+    let executed = execute_compile(executor.as_ref(), &lease);
     let current_revision = state.registry.get(session_id)?.lock().revision();
     let mut compiler = state.compiler.lock();
     let completion = compiler.complete(&lease, executed, current_revision)?;
@@ -1779,9 +1810,9 @@ fn static_preflight_for_owner(
     );
 
     // Clear the staging lease through the same scheduler lifecycle without
-    // introducing a process launch. `NoCompileExecutor` returns immediately.
+    // consulting the production executor or introducing a process launch.
     lease.cancellation().cancel()?;
-    let executed = execute_compile(&NoCompileExecutor, &lease);
+    let executed = cancelled_compile(&lease);
     let mut compiler = state.compiler.lock();
     let _ = compiler.complete(&lease, executed, revision)?;
     drop(compiler);

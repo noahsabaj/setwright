@@ -50,7 +50,8 @@ job tree on cancel or revision replacement.
 - **Windows:** a restrictive AppContainer identity, ACL-limited stage/runtime,
   and kill-on-close Job Object.
 - **macOS:** a separately signed XPC compiler service inside App Sandbox, with
-  no network entitlement and only app-group staging access.
+  no network entitlement, only app-group staging access, and the immutable
+  runtime sealed into the service bundle's read-only resources.
 - **Linux:** bundled bubblewrap with user, mount, PID, IPC, and network
   namespaces; dropped capabilities; `no_new_privs`; seccomp; and resource
   limits. If user namespaces are unavailable, compilation is disabled.
@@ -80,3 +81,25 @@ policy objects.
 Current status: this repository does not yet claim that those platform gates,
 production signing keys, managed-runtime hosting, or independent security
 review are complete. See [release readiness](release-readiness.md).
+
+## Containment spike evidence
+
+The native CI spike installs an Ed25519 test-signed runtime whose fixed
+`latexmk` tool is a host-native hostile helper. It exercises the same broker,
+suspended-child control, stream draining, cancellation, and native launcher
+used by compilation. The helper probes outside/original writes, DNS and HTTP,
+fixed shell/rc arguments, child survival, memory, process count, and aggregate
+writable output.
+
+The workflow emits `SandboxProbeEvidence`, but intentionally leaves pdfLaTeX,
+XeLaTeX, BibTeX, Biber, and SyncTeX false. `SandboxAttestation` must reject that
+evidence. These fixture runs are prototype containment evidence only; they are
+not signed TeX Live or packaged-release acceptance evidence.
+
+Darwin's `RLIMIT_RSS` aliases the virtual-address-space `RLIMIT_AS`, which
+cannot be lowered below the signed launcher's existing mappings. The macOS
+prototype therefore keeps process-count, writable-output, and process-group
+enforcement in the sandboxed XPC service while the signed Rust broker samples
+aggregate descendant RSS and requests service-owned termination. A failed
+sample is fail closed. This split is part of the non-closing prototype and must
+be reviewed again against the packaged release candidate.

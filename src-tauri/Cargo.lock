@@ -3285,6 +3285,7 @@ dependencies = [
  "codebook-tree-sitter-latex",
  "ed25519-dalek",
  "hex",
+ "libc",
  "parking_lot",
  "pretty_assertions",
  "reqwest",
@@ -3309,6 +3310,7 @@ dependencies = [
  "url",
  "uuid",
  "walkdir",
+ "windows-sys 0.61.2",
  "zip",
  "zstd",
 ]

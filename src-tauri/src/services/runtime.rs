@@ -549,6 +549,19 @@ impl InstalledRuntime {
     pub fn manifest_sha256(&self) -> &str {
         &self.manifest_sha256
     }
+
+    #[cfg(test)]
+    pub(crate) fn fixture(
+        profile_id: impl Into<String>,
+        root: impl Into<PathBuf>,
+        manifest_sha256: impl Into<String>,
+    ) -> Self {
+        Self {
+            profile_id: profile_id.into(),
+            root: root.into(),
+            manifest_sha256: manifest_sha256.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
