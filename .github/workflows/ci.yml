@@ -76,7 +76,6 @@ jobs:
         os:
           - ubuntu-22.04
           - windows-2022
-          - macos-14
           - macos-15
     runs-on: ${{ matrix.os }}
     steps:
@@ -84,7 +83,6 @@ jobs:
         with:
           persist-credentials: false
       - name: Restore the verified frontend
-        if: matrix.os != 'macos-14'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: frontend-dist
@@ -95,19 +93,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-        if: matrix.os != 'macos-14'
         with:
           toolchain: 1.95.0
           components: rustfmt, clippy
-      - if: matrix.os != 'macos-14'
-        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
-      - if: matrix.os != 'macos-14'
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
-      - if: matrix.os != 'macos-14'
-        run: cargo test --manifest-path src-tauri/Cargo.toml --all-features
-      - name: Preserve the legacy macOS ruleset context during migration
-        if: matrix.os == 'macos-14'
-        run: echo 'Temporary bridge only; macOS 15 is the supported and tested floor.'
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --all-features
       - name: Generated TypeScript contracts are current
         if: runner.os == 'Linux'
         run: |
@@ -125,7 +116,6 @@ jobs:
         os:
           - ubuntu-22.04
           - windows-2022
-          - macos-14
           - macos-15
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
@@ -172,7 +162,7 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo build --locked --manifest-path tools/sandbox/hostile-fixture/Cargo.toml --target x86_64-unknown-linux-musl
       - name: Assemble test-signed macOS XPC host
-        if: runner.os == 'macOS' && matrix.os != 'macos-14'
+        if: runner.os == 'macOS'
         timeout-minutes: 15
         shell: bash
         run: |
@@ -341,7 +331,7 @@ jobs:
           export SETWRIGHT_PROBE_EVIDENCE="$RUNNER_TEMP/sandbox-probe-linux.json"
           cargo test --manifest-path src-tauri/Cargo.toml --test sandbox_containment native_hostile_fixture_containment_remains_incomplete_attestation -- --nocapture
       - name: Run macOS XPC hostile fixture
-        if: runner.os == 'macOS' && matrix.os != 'macos-14'
+        if: runner.os == 'macOS'
         shell: bash
         run: |
           set -euo pipefail
@@ -355,23 +345,19 @@ jobs:
           "$SETWRIGHT_CONTAINMENT_APP/Contents/MacOS/SetwrightContainment" \
             native_hostile_fixture_containment_remains_incomplete_attestation --nocapture
       - name: Diagnose macOS sandbox failure
-        if: failure() && runner.os == 'macOS' && matrix.os != 'macos-14'
+        if: failure() && runner.os == 'macOS'
         shell: bash
         run: |
           /usr/bin/log show --last 5m --style compact \
             --predicate 'process == "SetwrightCompilerXPC" OR process == "setwright-tex-launcher" OR process == "sandbox-hostile-fixture" OR eventMessage CONTAINS[c] "SetwrightContainment"' \
             || true
       - name: Upload containment-only probe evidence
-        if: matrix.os != 'macos-14'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sandbox-probe-${{ matrix.os }}
           path: ${{ runner.temp }}/sandbox-probe-*.json
           if-no-files-found: error
           retention-days: 14
-      - name: Preserve the legacy macOS ruleset context during migration
-        if: matrix.os == 'macos-14'
-        run: echo 'Temporary bridge only; macOS 15 is the supported and tested floor.'
 
   pdf-fixture:
     name: PDF fixture reproducibility
