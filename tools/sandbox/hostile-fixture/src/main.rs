@@ -20,6 +20,7 @@ struct ProbeConfig {
     mode: String,
     outside_canary: Option<PathBuf>,
     original_project_canary: Option<PathBuf>,
+    max_child_processes: Option<u16>,
 }
 
 #[derive(Debug, Serialize)]
@@ -37,6 +38,13 @@ struct BoundaryResult {
     latexmkrc_ignored: bool,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProcessCountResult {
+    successful_children: usize,
+    error: Option<String>,
+}
+
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("--fixture-child") {
         child_mode();
@@ -50,7 +58,7 @@ fn main() {
         "boundary" => boundary_mode(&config),
         "cancellation" => cancellation_mode(),
         "memory" => memory_mode(),
-        "process-count" => process_count_mode(),
+        "process-count" => process_count_mode(&config),
         "writable-output" => writable_output_mode(),
         other => panic!("unknown hostile fixture mode: {other}"),
     }
@@ -140,25 +148,65 @@ fn memory_mode() {
     }
 }
 
-fn process_count_mode() {
+fn process_count_mode(config: &ProbeConfig) {
     let executable = std::env::current_exe().expect("locate hostile fixture");
+    let max_child_processes = config
+        .max_child_processes
+        .expect("process-count probe requires maxChildProcesses");
+    assert!(
+        max_child_processes > 0,
+        "process-count limit must be positive"
+    );
     let mut children = Vec::new();
-    loop {
+    // The root process is accounted separately by every native launcher. One
+    // more child than the configured policy is enough to prove enforcement;
+    // an unbounded fork storm would test host PID exhaustion instead.
+    for child_index in 0..=max_child_processes {
+        if child_index == max_child_processes {
+            let result = ProcessCountResult {
+                successful_children: children.len(),
+                error: None,
+            };
+            fs::write(
+                "output/process-limit-armed.json",
+                serde_json::to_vec(&result).expect("serialize armed process-limit probe"),
+            )
+            .expect("write armed process-limit evidence");
+        }
         match Command::new(&executable).arg("--fixture-child").spawn() {
             Ok(child) => {
                 children.push(child);
-                // Stay hostile and exceed the 32-child policy quickly, while
-                // leaving enough scheduler time for a polling native watchdog
-                // to terminate the tree before the CI account exhausts PIDs.
+                // Give polling implementations a scheduling opportunity while
+                // still crossing the 32-child preview policy in under a second.
                 thread::sleep(Duration::from_millis(5));
             }
             Err(error) => {
-                let _ = fs::write("output/process-limit.txt", error.to_string());
+                let result = ProcessCountResult {
+                    successful_children: children.len(),
+                    error: Some(error.to_string()),
+                };
+                fs::write(
+                    "output/process-spawn-blocked.json",
+                    serde_json::to_vec(&result).expect("serialize process rejection"),
+                )
+                .expect("write process rejection evidence");
                 loop {
                     thread::sleep(Duration::from_secs(60));
                 }
             }
         }
+    }
+    let result = ProcessCountResult {
+        successful_children: children.len(),
+        error: None,
+    };
+    fs::write(
+        "output/process-limit-breached.json",
+        serde_json::to_vec(&result).expect("serialize process-limit breach"),
+    )
+    .expect("write process-limit breach evidence");
+    loop {
+        thread::sleep(Duration::from_secs(60));
     }
 }
 

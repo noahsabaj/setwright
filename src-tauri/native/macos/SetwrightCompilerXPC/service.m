@@ -16,6 +16,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifndef SETWRIGHT_APP_GROUP
@@ -32,12 +33,15 @@
   "anchor apple generic and certificate leaf[subject.OU] = \"SETWRIGHT_TEAM_ID_REQUIRED\" and entitlement[\"com.apple.security.inherit\"] exists"
 #endif
 
+static const uint64_t SWBrokerWaitRegistrationNanos = 30ULL * 1000000000ULL;
+
 extern char **environ;
 
 @interface SWJob : NSObject
 @property(nonatomic) pid_t pid;
 @property(nonatomic) uint64_t writableLimit;
 @property(nonatomic) uint32_t processLimit;
+@property(nonatomic) uint64_t wallDeadlineNanos;
 @property(nonatomic, copy) NSString *outputRoot;
 @property(atomic) BOOL completed;
 @property(atomic) BOOL resumed;
@@ -53,6 +57,17 @@ extern char **environ;
 
 static dispatch_queue_t jobsQueue;
 static NSMutableDictionary<NSString *, SWJob *> *jobs;
+
+static BOOL monotonic_nanoseconds(uint64_t *value) {
+  if (value == NULL) return NO;
+  struct timespec now = {};
+  if (clock_gettime(CLOCK_MONOTONIC, &now) != 0 || now.tv_sec < 0 ||
+      now.tv_nsec < 0) return NO;
+  uint64_t seconds = 0;
+  return !__builtin_mul_overflow((uint64_t)now.tv_sec, 1000000000ULL,
+                                 &seconds) &&
+         !__builtin_add_overflow(seconds, (uint64_t)now.tv_nsec, value);
+}
 
 static void reply_error(xpc_object_t request, const char *message) {
   xpc_object_t reply = xpc_dictionary_create_reply(request);
@@ -228,10 +243,14 @@ static void start_watchdog(NSString *jobId, SWJob *job) {
         SWProcessInspection processes =
             inspect_process_limit(job.pid, job.processLimit);
         uint64_t output = directory_bytes(job.outputRoot, &outputValid);
+        uint64_t now = 0;
+        BOOL timeValid = monotonic_nanoseconds(&now);
         NSString *violation = nil;
-        if (processes.valid && outputValid) {
+        if (processes.valid && outputValid && timeValid) {
           invalidSamples = 0;
-          if (processes.exceeded) {
+          if (now >= job.wallDeadlineNanos) {
+            violation = @"wall-clock compile limit exceeded";
+          } else if (processes.exceeded) {
             violation = [NSString stringWithFormat:
                 @"process count %lu exceeded limit %u",
                 (unsigned long)processes.count, job.processLimit];
@@ -242,8 +261,8 @@ static void start_watchdog(NSString *jobId, SWJob *job) {
           }
         } else if (++invalidSamples >= 3) {
           violation = [NSString stringWithFormat:
-              @"resource inspection failed (processes=%d output=%d)",
-              processes.valid, outputValid];
+              @"resource inspection failed (processes=%d output=%d time=%d)",
+              processes.valid, outputValid, timeValid];
         }
         if (violation != nil) {
           int terminationError = terminate_job(
@@ -259,6 +278,69 @@ static void start_watchdog(NSString *jobId, SWJob *job) {
       usleep(5000);
     }
     (void)jobId;
+  });
+}
+
+static void reap_job(NSString *jobId, SWJob *job, xpc_object_t reply,
+                     xpc_connection_t peer) {
+  int status = 0;
+  pid_t waited = 0;
+  do {
+    waited = waitpid(job.pid, &status, 0);
+  } while (waited < 0 && errno == EINTR);
+  if (waited < 0) {
+    terminate_job(job, @"Setwright XPC waiter could not reap the process group");
+    job.completed = YES;
+    if (reply != NULL)
+      xpc_dictionary_set_string(reply, "error",
+                                "cannot wait for XPC compiler process");
+  } else {
+    NSString *terminationDetail = nil;
+    @synchronized(job) {
+      job.completed = YES;
+      terminationDetail = job.terminationDetail;
+    }
+    job.exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+    if (WIFSIGNALED(status)) {
+      NSString *detail = terminationDetail ?: [NSString stringWithFormat:
+          @"Setwright XPC compiler terminated by signal %d", WTERMSIG(status)];
+      dprintf(job.diagnosticFd, "%s\n", detail.UTF8String);
+    }
+    if (reply != NULL) xpc_dictionary_set_int64(reply, "exitCode", job.exitCode);
+  }
+  close(job.diagnosticFd);
+  job.diagnosticFd = -1;
+  if (reply != NULL) {
+    if (peer != NULL) xpc_connection_send_message(peer, reply);
+    xpc_release(reply);
+  }
+  if (peer != NULL) xpc_release(peer);
+  dispatch_sync(jobsQueue, ^{ [jobs removeObjectForKey:jobId]; });
+  end_lifecycle_transaction(job);
+}
+
+static void start_orphan_reaper(NSString *jobId, SWJob *job,
+                                uint64_t delayNanos) {
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)delayNanos),
+                 dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+    @autoreleasepool {
+      BOOL claimed = NO;
+      @synchronized(job) {
+        if (!job.completed && !job.waiting) {
+          job.waiting = YES;
+          claimed = YES;
+        }
+      }
+      if (!claimed) return;
+      int terminationError = terminate_job(
+          job, @"Setwright XPC orphan reaper expired without a broker waiter");
+      if (terminationError != 0 && terminationError != ESRCH) {
+        os_log_error(OS_LOG_DEFAULT,
+                     "Setwright XPC orphan reaper could not terminate job: %{public}d",
+                     terminationError);
+      }
+      reap_job(jobId, job, NULL, NULL);
+    }
   });
 }
 
@@ -372,10 +454,18 @@ static void handle_launch(xpc_object_t request) {
     return;
   }
 
+  uint64_t timeoutMs = xpc_dictionary_get_uint64(request, "timeoutMs");
   uint64_t memory = xpc_dictionary_get_uint64(request, "memoryLimit");
   uint64_t writable = xpc_dictionary_get_uint64(request, "writableLimit");
   uint64_t processLimit = xpc_dictionary_get_uint64(request, "processLimit");
-  if (memory == 0 || writable == 0 || processLimit == 0 || processLimit > 4096) {
+  uint64_t now = 0;
+  uint64_t timeoutNanos = 0;
+  uint64_t wallDeadlineNanos = 0;
+  if (timeoutMs == 0 || timeoutMs > 24ULL * 60ULL * 60ULL * 1000ULL ||
+      memory == 0 || writable == 0 || processLimit == 0 || processLimit > 4096 ||
+      !monotonic_nanoseconds(&now) ||
+      __builtin_mul_overflow(timeoutMs, 1000000ULL, &timeoutNanos) ||
+      __builtin_add_overflow(now, timeoutNanos, &wallDeadlineNanos)) {
     reply_error(request, "invalid XPC resource limits");
     return;
   }
@@ -423,10 +513,11 @@ static void handle_launch(xpc_object_t request) {
     return;
   }
   NSString *jobId = NSUUID.UUID.UUIDString;
-  SWJob *job = [SWJob new];
+  SWJob *job = [[[SWJob alloc] init] autorelease];
   job.pid = pid;
   job.writableLimit = writable;
   job.processLimit = (uint32_t)MIN(processLimit, UINT32_MAX);
+  job.wallDeadlineNanos = wallDeadlineNanos;
   job.outputRoot = output;
   job.diagnosticFd = stderrPipe[1];
   dispatch_sync(jobsQueue, ^{ jobs[jobId] = job; });
@@ -464,6 +555,7 @@ static void handle_launch(xpc_object_t request) {
   // wait request creates the long-lived asynchronous reply transaction.
   xpc_transaction_begin();
   job.lifecycleTransactionOpen = YES;
+  start_orphan_reaper(jobId, job, SWBrokerWaitRegistrationNanos);
   xpc_dictionary_set_string(reply, "jobId", jobId.UTF8String);
   xpc_dictionary_set_int64(reply, "pid", pid);
   xpc_dictionary_set_fd(reply, "stdout", stdoutPipe[0]);
@@ -478,8 +570,8 @@ static SWJob *lookup_job(xpc_object_t request, NSString **jobId) {
   if (text == NULL) return nil;
   *jobId = [NSString stringWithUTF8String:text];
   __block SWJob *job = nil;
-  dispatch_sync(jobsQueue, ^{ job = jobs[*jobId]; });
-  return job;
+  dispatch_sync(jobsQueue, ^{ job = [jobs[*jobId] retain]; });
+  return [job autorelease];
 }
 
 static void handle_control(xpc_object_t request, NSString *operation) {
@@ -529,6 +621,12 @@ static void handle_wait(xpc_object_t request) {
     reply_error(request, "cannot allocate XPC wait reply");
     return;
   }
+  xpc_connection_t peer = xpc_dictionary_get_remote_connection(request);
+  if (peer == NULL) {
+    xpc_release(reply);
+    reply_error(request, "XPC wait request has no remote connection");
+    return;
+  }
   @synchronized(job) {
     if (job.waiting) {
       xpc_release(reply);
@@ -537,45 +635,13 @@ static void handle_wait(xpc_object_t request) {
     }
     job.waiting = YES;
   }
-  xpc_connection_t peer = xpc_dictionary_get_remote_connection(request);
   xpc_retain(peer);
   // Creating `reply` keeps the automatic message transaction open while the
   // asynchronous wait runs, so the explicit launch transaction can end now.
   end_lifecycle_transaction(job);
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
     @autoreleasepool {
-      int status = 0;
-      pid_t waited = 0;
-      do {
-        waited = waitpid(job.pid, &status, 0);
-      } while (waited < 0 && errno == EINTR);
-      if (waited < 0) {
-        terminate_job(job, @"Setwright XPC waiter could not reap the process group");
-        job.completed = YES;
-        close(job.diagnosticFd);
-        job.diagnosticFd = -1;
-        xpc_dictionary_set_string(reply, "error",
-                                  "cannot wait for XPC compiler process");
-      } else {
-        NSString *terminationDetail = nil;
-        @synchronized(job) {
-          job.completed = YES;
-          terminationDetail = job.terminationDetail;
-        }
-        job.exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
-        if (WIFSIGNALED(status)) {
-          NSString *detail = terminationDetail ?: [NSString stringWithFormat:
-              @"Setwright XPC compiler terminated by signal %d", WTERMSIG(status)];
-          dprintf(job.diagnosticFd, "%s\n", detail.UTF8String);
-        }
-        close(job.diagnosticFd);
-        job.diagnosticFd = -1;
-        xpc_dictionary_set_int64(reply, "exitCode", job.exitCode);
-      }
-      xpc_connection_send_message(peer, reply);
-      xpc_release(reply);
-      xpc_release(peer);
-      dispatch_sync(jobsQueue, ^{ [jobs removeObjectForKey:jobId]; });
+      reap_job(jobId, job, reply, peer);
     }
   });
 }

@@ -101,5 +101,17 @@ cannot be lowered below the signed launcher's existing mappings. The macOS
 prototype therefore keeps process-count, writable-output, and process-group
 enforcement in the sandboxed XPC service while the signed Rust broker samples
 aggregate descendant RSS and requests service-owned termination. A failed
-sample is fail closed. This split is part of the non-closing prototype and must
-be reviewed again against the packaged release candidate.
+sample is fail closed. The service also owns an independent monotonic wall-clock
+deadline. Every broker XPC request uses a fresh connection with a bounded reply
+deadline, so a lost or wedged reply cannot block cancellation or CI forever. If
+a launch reply is lost before the broker receives its job identifier, a bounded
+service-side orphan reaper terminates and reaps the suspended process group,
+removes its registry entry, and closes the outstanding XPC transaction.
+
+The hostile process-count probe creates exactly the configured number of
+children, records that the boundary is armed, and then attempts one additional
+child. Evidence is accepted only when the native limit rejects that exact extra
+spawn or the service watchdog terminates the armed process tree. The probe never
+uses an unbounded fork storm, which could exhaust the shared CI account before
+the sandbox boundary can report its result. This split is part of the non-closing
+prototype and must be reviewed again against the packaged release candidate.
