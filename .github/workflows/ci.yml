@@ -200,8 +200,10 @@ jobs:
           codesign --force --sign - --identifier org.setwright.desktop "$app"
           codesign --verify --deep --strict --verbose=2 "$app"
           codesign --display --entitlements - "$service"
-          codesign --display --requirements - "$service/Contents/Resources/setwright-tex-launcher"
-          codesign --display --requirements - "$runtime_root/texlive-2025.2025-08-03-macos-aarch64/bin/latexmk"
+          codesign --verify --strict --verbose=2 "$service/Contents/Resources/setwright-tex-launcher"
+          codesign --display --entitlements - --requirements - "$service/Contents/Resources/setwright-tex-launcher"
+          codesign --verify --strict --verbose=2 "$runtime_root/texlive-2025.2025-08-03-macos-aarch64/bin/latexmk"
+          codesign --display --entitlements - --requirements - "$runtime_root/texlive-2025.2025-08-03-macos-aarch64/bin/latexmk"
 
           group_root="$HOME/Library/Group Containers/group.org.setwright.desktop"
           stage_root="$group_root/compile-stages"

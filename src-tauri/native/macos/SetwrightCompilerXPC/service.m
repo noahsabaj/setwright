@@ -60,11 +60,12 @@ static BOOL path_is_within(NSString *path, NSString *root) {
   return [resolvedPath hasPrefix:[resolvedRoot stringByAppendingString:@"/"]];
 }
 
-static BOOL verify_code(NSString *path, NSString *requirementText) {
+static OSStatus verify_code(NSString *path, NSString *requirementText) {
   SecStaticCodeRef code = NULL;
   OSStatus status = SecStaticCodeCreateWithPath(
       (__bridge CFURLRef)[NSURL fileURLWithPath:path], kSecCSDefaultFlags, &code);
-  if (status != errSecSuccess || code == NULL) return NO;
+  if (status != errSecSuccess || code == NULL)
+    return status == errSecSuccess ? errSecParam : status;
   SecRequirementRef requirement = NULL;
   status = SecRequirementCreateWithString((__bridge CFStringRef)requirementText,
                                           kSecCSDefaultFlags, &requirement);
@@ -72,7 +73,7 @@ static BOOL verify_code(NSString *path, NSString *requirementText) {
     status = SecStaticCodeCheckValidity(code, kSecCSStrictValidate, requirement);
   if (requirement != NULL) CFRelease(requirement);
   CFRelease(code);
-  return status == errSecSuccess;
+  return status;
 }
 
 static NSArray<NSNumber *> *process_tree(pid_t root) {
@@ -254,12 +255,22 @@ static void handle_launch(xpc_object_t request) {
     reply_error(request, "XPC runtime is outside the signed host bundle");
     return;
   }
-  if (launcher == nil || !verify_code(launcher, @SETWRIGHT_HELPER_REQUIREMENT)) {
-    reply_error(request, "XPC signed inheriting launcher requirement failed");
+  OSStatus launcherStatus = launcher == nil
+      ? errSecParam : verify_code(launcher, @SETWRIGHT_HELPER_REQUIREMENT);
+  if (launcherStatus != errSecSuccess) {
+    char message[128];
+    snprintf(message, sizeof(message),
+             "XPC signed inheriting launcher requirement failed: %d",
+             (int)launcherStatus);
+    reply_error(request, message);
     return;
   }
-  if (!verify_code(latexmk, @SETWRIGHT_HELPER_REQUIREMENT)) {
-    reply_error(request, "XPC signed TeX helper requirement failed");
+  OSStatus helperStatus = verify_code(latexmk, @SETWRIGHT_HELPER_REQUIREMENT);
+  if (helperStatus != errSecSuccess) {
+    char message[128];
+    snprintf(message, sizeof(message),
+             "XPC signed TeX helper requirement failed: %d", (int)helperStatus);
+    reply_error(request, message);
     return;
   }
 
