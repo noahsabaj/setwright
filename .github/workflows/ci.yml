@@ -155,7 +155,7 @@ jobs:
           sha256sum "$RUNNER_TEMP/setwright-bwrap/build/bwrap" "$RUNNER_TEMP/setwright-seccomp.bpf"
       - name: Build static Linux hostile helper
         if: runner.os == 'Linux'
-        run: cargo build --manifest-path src-tauri/Cargo.toml --bin sandbox-hostile-fixture --target x86_64-unknown-linux-musl
+        run: cargo build --locked --manifest-path tools/sandbox/hostile-fixture/Cargo.toml --target x86_64-unknown-linux-musl
       - name: Assemble test-signed macOS XPC host
         if: runner.os == 'macOS'
         shell: bash
@@ -226,7 +226,7 @@ jobs:
           export SETWRIGHT_BWRAP_SHA256="$(sha256sum "$SETWRIGHT_BWRAP_PATH" | cut -d' ' -f1)"
           export SETWRIGHT_SECCOMP_PATH="$RUNNER_TEMP/setwright-seccomp.bpf"
           export SETWRIGHT_SECCOMP_SHA256="$(sha256sum "$SETWRIGHT_SECCOMP_PATH" | cut -d' ' -f1)"
-          export SETWRIGHT_HOSTILE_FIXTURE_PATH="$PWD/src-tauri/target/x86_64-unknown-linux-musl/debug/sandbox-hostile-fixture"
+          export SETWRIGHT_HOSTILE_FIXTURE_PATH="$PWD/tools/sandbox/hostile-fixture/target/x86_64-unknown-linux-musl/debug/sandbox-hostile-fixture"
           export SETWRIGHT_PROBE_EVIDENCE="$RUNNER_TEMP/sandbox-probe-linux.json"
           cargo test --manifest-path src-tauri/Cargo.toml --test sandbox_containment native_hostile_fixture_containment_remains_incomplete_attestation -- --nocapture
       - name: Run macOS XPC hostile fixture
