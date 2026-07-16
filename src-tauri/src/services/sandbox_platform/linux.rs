@@ -372,7 +372,7 @@ fn process_tree(root: i32) -> Option<Vec<i32>> {
 }
 
 const fn bubblewrap_process_limit(max_child_processes: u16) -> u32 {
-    u32::from(max_child_processes)
+    (max_child_processes as u32)
         .saturating_add(1)
         .saturating_add(BUBBLEWRAP_INFRASTRUCTURE_PROCESSES)
 }
