@@ -182,12 +182,44 @@ jobs:
           xcrun clang src-tauri/native/macos/SetwrightCompilerXPC/tex_launcher.c \
             -o "$service/Contents/Resources/setwright-tex-launcher"
 
+          keychain="$RUNNER_TEMP/setwright-test-signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -subj '/CN=Setwright CI Test Signing/' \
+            -addext 'keyUsage=digitalSignature' \
+            -addext 'extendedKeyUsage=codeSigning' \
+            -keyout "$RUNNER_TEMP/setwright-test-signing.key" \
+            -out "$RUNNER_TEMP/setwright-test-signing.crt"
+          pkcs12_legacy=()
+          if openssl pkcs12 -help 2>&1 | grep -q -- '-legacy'; then
+            pkcs12_legacy=(-legacy)
+          fi
+          openssl pkcs12 -export "${pkcs12_legacy[@]}" \
+            -inkey "$RUNNER_TEMP/setwright-test-signing.key" \
+            -in "$RUNNER_TEMP/setwright-test-signing.crt" \
+            -passout "pass:$keychain_password" \
+            -out "$RUNNER_TEMP/setwright-test-signing.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/setwright-test-signing.p12" \
+            -k "$keychain" -P "$keychain_password" -T /usr/bin/codesign
+          security add-trusted-cert -r trustRoot -k "$keychain" \
+            "$RUNNER_TEMP/setwright-test-signing.crt"
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain"
+          security default-keychain -d user -s "$keychain"
+          identity="$(security find-identity -v -p codesigning "$keychain" | \
+            awk '/Setwright CI Test Signing/ { print $2; exit }')"
+          test -n "$identity"
+
           helper_entitlements=src-tauri/native/macos/SetwrightCompilerXPC/helper.entitlements
           service_entitlements=src-tauri/native/macos/SetwrightCompilerXPC/service.entitlements
-          codesign --force --sign - --identifier org.setwright.desktop.tex-launcher \
+          codesign --force --sign "$identity" --identifier org.setwright.desktop.tex-launcher \
             --entitlements "$helper_entitlements" \
             "$service/Contents/Resources/setwright-tex-launcher"
-          codesign --force --sign - --identifier org.setwright.hostile-fixture \
+          codesign --force --sign "$identity" --identifier org.setwright.hostile-fixture \
             --entitlements "$helper_entitlements" \
             src-tauri/target/debug/sandbox-hostile-fixture
 
@@ -195,9 +227,9 @@ jobs:
           SETWRIGHT_XPC_RUNTIME_ROOT="$runtime_root" \
           SETWRIGHT_HOSTILE_FIXTURE_PATH="$PWD/src-tauri/target/debug/sandbox-hostile-fixture" \
             "$test_binary" native_hostile_fixture_containment_remains_incomplete_attestation --nocapture
-          codesign --force --sign - --identifier org.setwright.desktop.compiler-xpc \
+          codesign --force --sign "$identity" --identifier org.setwright.desktop.compiler-xpc \
             --entitlements "$service_entitlements" "$service"
-          codesign --force --sign - --identifier org.setwright.desktop "$app"
+          codesign --force --sign "$identity" --identifier org.setwright.desktop "$app"
           codesign --verify --deep --strict --verbose=2 "$app"
           codesign --display --entitlements - "$service"
           codesign --verify --strict --verbose=2 "$service/Contents/Resources/setwright-tex-launcher"
