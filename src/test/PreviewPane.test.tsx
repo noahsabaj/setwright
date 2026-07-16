@@ -118,11 +118,14 @@ describe("PreviewPane PDF lifecycle", () => {
 
     view.rerender(<PreviewPane pdfBytes={secondBytes} />);
     expect(await screen.findByText("of 2")).toBeInTheDocument();
-    act(() => firstReady.resolve({ pageCount: 7 }));
+    await waitFor(() => expect(second.renderPage).toHaveBeenCalledOnce());
+    await act(async () => {
+      firstReady.resolve({ pageCount: 7 });
+      await firstReady.promise;
+    });
 
     expect(screen.queryByText("of 7")).not.toBeInTheDocument();
     expect(first.dispose).toHaveBeenCalled();
-    expect(second.renderPage).toHaveBeenCalled();
   });
 
   it("disposes a loading session when the component unmounts", async () => {
