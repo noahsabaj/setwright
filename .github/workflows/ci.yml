@@ -186,8 +186,9 @@ jobs:
           keychain="$RUNNER_TEMP/setwright-test-signing.keychain-db"
           keychain_password="$(uuidgen)"
           openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
-            -subj '/CN=Setwright CI Test Signing/' \
-            -addext 'keyUsage=digitalSignature' \
+            -subj '/CN=Setwright CI Test Signing/OU=SETWRIGHTCI/O=Setwright/' \
+            -addext 'basicConstraints=critical,CA:TRUE' \
+            -addext 'keyUsage=critical,digitalSignature,keyCertSign' \
             -addext 'extendedKeyUsage=codeSigning' \
             -keyout "$RUNNER_TEMP/setwright-test-signing.key" \
             -out "$RUNNER_TEMP/setwright-test-signing.crt"
@@ -205,10 +206,14 @@ jobs:
           security unlock-keychain -p "$keychain_password" "$keychain"
           security import "$RUNNER_TEMP/setwright-test-signing.p12" \
             -k "$keychain" -P "$keychain_password" -T /usr/bin/codesign
+          sudo -n security add-trusted-cert -d -r trustRoot \
+            -k /Library/Keychains/System.keychain \
+            "$RUNNER_TEMP/setwright-test-signing.crt"
           security set-key-partition-list -S apple-tool:,apple: -s \
             -k "$keychain_password" "$keychain"
           security list-keychains -d user -s "$keychain"
           security default-keychain -d user -s "$keychain"
+          security find-identity -v -p codesigning "$keychain"
           identity="$(security find-identity -v -p codesigning "$keychain" | \
             awk '/Setwright CI Test Signing/ { print $2; exit }')"
           test -n "$identity"
