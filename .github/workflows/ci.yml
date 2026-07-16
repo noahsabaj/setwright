@@ -168,6 +168,7 @@ jobs:
 
           app="$RUNNER_TEMP/SetwrightContainment.app"
           service="$app/Contents/XPCServices/SetwrightCompilerXPC.xpc"
+          runtime_root="$app/Contents/Resources/tex-runtime"
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/tex-runtime" \
             "$service/Contents/MacOS" "$service/Contents/Resources"
           cp src-tauri/native/macos/ContainmentHost-Info.plist "$app/Contents/Info.plist"
@@ -198,10 +199,12 @@ jobs:
             --entitlements "$service_entitlements" "$service"
           codesign --force --sign - --identifier org.setwright.desktop "$app"
           codesign --verify --deep --strict --verbose=2 "$app"
+          codesign --display --entitlements - "$service"
+          codesign --display --requirements - "$service/Contents/Resources/setwright-tex-launcher"
+          codesign --display --requirements - "$runtime_root/texlive-2025.2025-08-03-macos-aarch64/bin/latexmk"
 
           group_root="$HOME/Library/Group Containers/group.org.setwright.desktop"
           stage_root="$group_root/compile-stages"
-          runtime_root="$app/Contents/Resources/tex-runtime"
           mkdir -p "$stage_root"
           {
             echo "SETWRIGHT_CONTAINMENT_APP=$app"

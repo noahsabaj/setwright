@@ -238,11 +238,28 @@ static void handle_launch(xpc_object_t request) {
   NSString *latexmk = [runtime stringByAppendingPathComponent:@"bin/latexmk"];
   NSString *launcher = [NSBundle.mainBundle pathForResource:@"setwright-tex-launcher"
                                                       ofType:nil];
-  if (groupURL == nil || !path_is_within(stage, groupURL.path) ||
-      !path_is_within(output, stage) || !path_is_within(runtime, allowedRuntime) ||
-      launcher == nil || !verify_code(latexmk, @SETWRIGHT_HELPER_REQUIREMENT) ||
-      !verify_code(launcher, @SETWRIGHT_HELPER_REQUIREMENT)) {
-    reply_error(request, "XPC path or signed-helper requirement failed");
+  if (groupURL == nil) {
+    reply_error(request, "XPC app-group container is unavailable");
+    return;
+  }
+  if (!path_is_within(stage, groupURL.path)) {
+    reply_error(request, "XPC stage is outside the app-group container");
+    return;
+  }
+  if (!path_is_within(output, stage)) {
+    reply_error(request, "XPC output is outside the compile stage");
+    return;
+  }
+  if (!path_is_within(runtime, allowedRuntime)) {
+    reply_error(request, "XPC runtime is outside the signed host bundle");
+    return;
+  }
+  if (launcher == nil || !verify_code(launcher, @SETWRIGHT_HELPER_REQUIREMENT)) {
+    reply_error(request, "XPC signed inheriting launcher requirement failed");
+    return;
+  }
+  if (!verify_code(latexmk, @SETWRIGHT_HELPER_REQUIREMENT)) {
+    reply_error(request, "XPC signed TeX helper requirement failed");
     return;
   }
 
