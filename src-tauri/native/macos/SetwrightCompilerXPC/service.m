@@ -351,7 +351,7 @@ static void handle_control(xpc_object_t request, NSString *operation) {
   if (job == nil) { reply_error(request, "unknown XPC compile job"); return; }
   if ([operation isEqualToString:@"resume"]) {
     if (kill(job.pid, SIGCONT) != 0) { reply_error(request, "cannot resume XPC job"); return; }
-  } else if ([operation isEqualToString:@"terminate"] && !job.completed) {
+  } else if ([operation isEqualToString:@"terminate"]) {
     if (kill(-job.pid, SIGKILL) != 0 && errno != ESRCH) {
       reply_error(request, "cannot terminate XPC process group"); return;
     }

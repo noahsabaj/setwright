@@ -328,9 +328,6 @@ impl SandboxProcessControl for XpcJob {
     }
 
     fn terminate_tree(&self) -> AppResult<()> {
-        if self.finished.load(Ordering::Acquire) {
-            return Ok(());
-        }
         self.operation(sw_xpc_terminate, "terminate XPC compiler process group")
     }
 }

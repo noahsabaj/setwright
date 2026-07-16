@@ -158,6 +158,7 @@ jobs:
         run: cargo build --locked --manifest-path tools/sandbox/hostile-fixture/Cargo.toml --target x86_64-unknown-linux-musl
       - name: Assemble test-signed macOS XPC host
         if: runner.os == 'macOS'
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euo pipefail
@@ -204,8 +205,6 @@ jobs:
           security unlock-keychain -p "$keychain_password" "$keychain"
           security import "$RUNNER_TEMP/setwright-test-signing.p12" \
             -k "$keychain" -P "$keychain_password" -T /usr/bin/codesign
-          security add-trusted-cert -r trustRoot -k "$keychain" \
-            "$RUNNER_TEMP/setwright-test-signing.crt"
           security set-key-partition-list -S apple-tool:,apple: -s \
             -k "$keychain_password" "$keychain"
           security list-keychains -d user -s "$keychain"

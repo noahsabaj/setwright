@@ -416,9 +416,14 @@ fn drain_controlled_child(
             message: format!("sandboxed compiler exceeded its {timeout:?} wall-clock limit"),
         });
     }
-    exit_status.ok_or(AppError::CompileUnavailable {
+    let exit_status = exit_status.ok_or(AppError::CompileUnavailable {
         message: "sandboxed compiler exited without a status".into(),
-    })
+    })?;
+    // The initial process can exit after detaching a child that closed the
+    // inherited streams. Seal that escape before inspecting attacker-owned
+    // output names or bytes.
+    control.terminate_tree()?;
+    Ok(exit_status)
 }
 
 fn receive_child_event(receiver: &Receiver<ChildEvent>) -> AppResult<Option<ChildEvent>> {
@@ -1156,12 +1161,12 @@ fn collect_executor_artifacts(
     for entry in entries {
         let entry = entry
             .map_err(|error| AppError::io("read compile output entry", &output_root, error))?;
-        let path = entry.path();
-        let metadata = fs::symlink_metadata(&path)
-            .map_err(|error| AppError::io("inspect compile artifact", &path, error))?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
+        let file_type = entry
+            .file_type()
+            .map_err(|error| AppError::io("inspect compile artifact type", &output_root, error))?;
+        if file_type.is_symlink() || !file_type.is_file() {
             return Err(AppError::InvalidPath {
-                path: path.to_string_lossy().into_owned(),
+                path: entry.path().to_string_lossy().into_owned(),
                 message: "compile output may contain only direct, regular files".into(),
             });
         }
@@ -1169,10 +1174,10 @@ fn collect_executor_artifacts(
             .file_name()
             .into_string()
             .map_err(|_| AppError::InvalidPath {
-                path: path.to_string_lossy().into_owned(),
+                path: output_root.to_string_lossy().into_owned(),
                 message: "compile artifact name is not portable UTF-8".into(),
             })?;
-        validated_portable_relative_path(&name)?;
+        let (path, file, metadata) = open_direct_artifact(&output_root, &name)?;
         total_bytes = total_bytes.checked_add(metadata.len()).ok_or_else(|| {
             AppError::CompileUnavailable {
                 message: "compile artifact byte count overflowed".into(),
@@ -1190,6 +1195,7 @@ fn collect_executor_artifacts(
             || approved_auxiliary_name(&name)
         {
             Some(read_bounded_artifact(
+                file,
                 &path,
                 metadata.len(),
                 writable_limit,
@@ -1225,7 +1231,66 @@ fn collect_executor_artifacts(
     })
 }
 
-fn read_bounded_artifact(path: &Path, expected_len: u64, limit: u64) -> AppResult<Vec<u8>> {
+fn open_direct_artifact(
+    output_root: &Path,
+    name: &str,
+) -> AppResult<(PathBuf, File, fs::Metadata)> {
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\\') {
+        return Err(AppError::PathOutsideRoot { path: name.into() });
+    }
+    let relative = validated_portable_relative_path(name)?;
+    if relative.components().count() != 1 {
+        return Err(AppError::PathOutsideRoot { path: name.into() });
+    }
+    let candidate = output_root.join(relative);
+    let canonical = fs::canonicalize(&candidate)
+        .map_err(|error| AppError::io("canonicalize compile artifact", &candidate, error))?;
+    if canonical.parent() != Some(output_root) {
+        return Err(AppError::PathOutsideRoot {
+            path: canonical.to_string_lossy().into_owned(),
+        });
+    }
+    let file = open_artifact_no_follow(&canonical)
+        .map_err(|error| AppError::io("open compile artifact", &canonical, error))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| AppError::io("inspect open compile artifact", &canonical, error))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(AppError::InvalidPath {
+            path: canonical.to_string_lossy().into_owned(),
+            message: "compile output may contain only direct, regular files".into(),
+        });
+    }
+    Ok((canonical, file, metadata))
+}
+
+#[cfg(unix)]
+fn open_artifact_no_follow(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn open_artifact_no_follow(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+fn read_bounded_artifact(
+    file: File,
+    path: &Path,
+    expected_len: u64,
+    limit: u64,
+) -> AppResult<Vec<u8>> {
     if expected_len > limit || expected_len > usize::MAX as u64 {
         return Err(AppError::CompileUnavailable {
             message: format!(
@@ -1234,8 +1299,6 @@ fn read_bounded_artifact(path: &Path, expected_len: u64, limit: u64) -> AppResul
             ),
         });
     }
-    let file =
-        File::open(path).map_err(|error| AppError::io("open compile artifact", path, error))?;
     let mut bytes = Vec::with_capacity(expected_len as usize);
     file.take(limit.saturating_add(1))
         .read_to_end(&mut bytes)
@@ -2294,7 +2357,7 @@ mod tests {
         );
         assert_eq!(publication.auxiliary_cache["main.aux"], b"auxiliary cache");
         assert_eq!(resumes.load(Ordering::SeqCst), 1);
-        assert_eq!(terminations.load(Ordering::SeqCst), 0);
+        assert_eq!(terminations.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -2351,6 +2414,31 @@ mod tests {
             panic!("malicious artifact was accepted");
         };
         assert!(error.to_string().contains("direct, regular files"));
+    }
+
+    #[test]
+    fn artifact_collection_rejects_path_components_before_opening() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("output");
+        fs::create_dir(&output).unwrap();
+
+        for name in [
+            "",
+            ".",
+            "..",
+            "../outside.pdf",
+            "nested/main.pdf",
+            "nested\\main.pdf",
+            "C:outside.pdf",
+        ] {
+            assert!(
+                matches!(
+                    open_direct_artifact(&output, name),
+                    Err(AppError::PathOutsideRoot { .. })
+                ),
+                "artifact path was not rejected before access: {name:?}"
+            );
+        }
     }
 
     #[test]

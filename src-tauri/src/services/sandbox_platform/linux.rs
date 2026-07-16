@@ -268,9 +268,6 @@ impl SandboxProcessControl for LinuxProcessControl {
             .lock()
             .map_err(|_| unavailable("bubblewrap resume control was poisoned"))?
             .take();
-        if self.finished.load(Ordering::Acquire) {
-            return Ok(());
-        }
         let result = unsafe { libc::kill(-self.pid, libc::SIGKILL) };
         if result != 0 {
             let error = std::io::Error::last_os_error();

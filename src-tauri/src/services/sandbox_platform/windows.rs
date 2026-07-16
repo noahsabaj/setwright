@@ -256,9 +256,6 @@ impl SandboxProcessControl for ProcessState {
     }
 
     fn terminate_tree(&self) -> AppResult<()> {
-        if self.finished.load(Ordering::Acquire) {
-            return Ok(());
-        }
         if unsafe { TerminateJobObject(self.job(), TERMINATED_EXIT_CODE) } == 0 {
             let error = std::io::Error::last_os_error();
             if !self.finished.load(Ordering::Acquire) {
