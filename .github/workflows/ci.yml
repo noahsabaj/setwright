@@ -190,11 +190,11 @@ jobs:
             -addext 'extendedKeyUsage=codeSigning' \
             -keyout "$RUNNER_TEMP/setwright-test-signing.key" \
             -out "$RUNNER_TEMP/setwright-test-signing.crt"
-          pkcs12_legacy=()
+          pkcs12_legacy=''
           if openssl pkcs12 -help 2>&1 | grep -q -- '-legacy'; then
-            pkcs12_legacy=(-legacy)
+            pkcs12_legacy='-legacy'
           fi
-          openssl pkcs12 -export "${pkcs12_legacy[@]}" \
+          openssl pkcs12 -export $pkcs12_legacy \
             -inkey "$RUNNER_TEMP/setwright-test-signing.key" \
             -in "$RUNNER_TEMP/setwright-test-signing.crt" \
             -passout "pass:$keychain_password" \
