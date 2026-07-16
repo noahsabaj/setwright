@@ -220,10 +220,12 @@ jobs:
 
           helper_entitlements=src-tauri/native/macos/SetwrightCompilerXPC/helper.entitlements
           service_entitlements=src-tauri/native/macos/SetwrightCompilerXPC/service.entitlements
-          codesign --force --sign "$identity" --identifier org.setwright.desktop.tex-launcher \
+          codesign --force --keychain "$keychain" --sign "$identity" \
+            --identifier org.setwright.desktop.tex-launcher \
             --entitlements "$helper_entitlements" \
             "$service/Contents/Resources/setwright-tex-launcher"
-          codesign --force --sign "$identity" --identifier org.setwright.hostile-fixture \
+          codesign --force --keychain "$keychain" --sign "$identity" \
+            --identifier org.setwright.hostile-fixture \
             --entitlements "$helper_entitlements" \
             src-tauri/target/debug/sandbox-hostile-fixture
 
@@ -231,9 +233,11 @@ jobs:
           SETWRIGHT_XPC_RUNTIME_ROOT="$runtime_root" \
           SETWRIGHT_HOSTILE_FIXTURE_PATH="$PWD/src-tauri/target/debug/sandbox-hostile-fixture" \
             "$test_binary" native_hostile_fixture_containment_remains_incomplete_attestation --nocapture
-          codesign --force --sign "$identity" --identifier org.setwright.desktop.compiler-xpc \
+          codesign --force --keychain "$keychain" --sign "$identity" \
+            --identifier org.setwright.desktop.compiler-xpc \
             --entitlements "$service_entitlements" "$service"
-          codesign --force --sign "$identity" --identifier org.setwright.desktop "$app"
+          codesign --force --keychain "$keychain" --sign "$identity" \
+            --identifier org.setwright.desktop "$app"
           codesign --verify --deep --strict --verbose=2 "$app"
           codesign --display --entitlements - "$service"
           codesign --verify --strict --verbose=2 "$service/Contents/Resources/setwright-tex-launcher"
