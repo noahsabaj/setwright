@@ -204,36 +204,38 @@ static void start_watchdog(NSString *jobId, SWJob *job) {
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
     unsigned invalidSamples = 0;
     while (!job.completed) {
-      BOOL outputValid = NO;
-      SWProcessInspection processes =
-          inspect_process_limit(job.pid, job.processLimit);
-      uint64_t output = directory_bytes(job.outputRoot, &outputValid);
-      NSString *violation = nil;
-      if (processes.valid && outputValid) {
-        invalidSamples = 0;
-        if (processes.exceeded) {
+      @autoreleasepool {
+        BOOL outputValid = NO;
+        SWProcessInspection processes =
+            inspect_process_limit(job.pid, job.processLimit);
+        uint64_t output = directory_bytes(job.outputRoot, &outputValid);
+        NSString *violation = nil;
+        if (processes.valid && outputValid) {
+          invalidSamples = 0;
+          if (processes.exceeded) {
+            violation = [NSString stringWithFormat:
+                @"process count %lu exceeded limit %u",
+                (unsigned long)processes.count, job.processLimit];
+          } else if (output > job.writableLimit) {
+            violation = [NSString stringWithFormat:
+                @"writable output %llu exceeded limit %llu", output,
+                job.writableLimit];
+          }
+        } else if (++invalidSamples >= 3) {
           violation = [NSString stringWithFormat:
-              @"process count %lu exceeded limit %u",
-              (unsigned long)processes.count, job.processLimit];
-        } else if (output > job.writableLimit) {
-          violation = [NSString stringWithFormat:
-              @"writable output %llu exceeded limit %llu", output,
-              job.writableLimit];
+              @"resource inspection failed (processes=%d output=%d)",
+              processes.valid, outputValid];
         }
-      } else if (++invalidSamples >= 3) {
-        violation = [NSString stringWithFormat:
-            @"resource inspection failed (processes=%d output=%d)",
-            processes.valid, outputValid];
-      }
-      if (violation != nil) {
-        int terminationError = terminate_job(
-            job, [@"Setwright XPC watchdog: " stringByAppendingString:violation]);
-        if (terminationError == 0) {
-          os_log_error(OS_LOG_DEFAULT, "Setwright XPC watchdog terminated job: %{public}s",
-                       violation.UTF8String);
-          break;
+        if (violation != nil) {
+          int terminationError = terminate_job(
+              job, [@"Setwright XPC watchdog: " stringByAppendingString:violation]);
+          if (terminationError == 0) {
+            os_log_error(OS_LOG_DEFAULT, "Setwright XPC watchdog terminated job: %{public}s",
+                         violation.UTF8String);
+            break;
+          }
+          if (terminationError == ESRCH) break;
         }
-        if (terminationError == ESRCH) break;
       }
       usleep(10000);
     }
@@ -473,38 +475,40 @@ static void handle_wait(xpc_object_t request) {
   if (job == nil) { reply_error(request, "unknown XPC compile job"); return; }
   xpc_retain(request);
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-    int status = 0;
-    pid_t waited = 0;
-    do {
-      waited = waitpid(job.pid, &status, 0);
-    } while (waited < 0 && errno == EINTR);
-    if (waited < 0) {
-      terminate_job(job, @"Setwright XPC waiter could not reap the process group");
-      job.completed = YES;
-      close(job.diagnosticFd);
-      job.diagnosticFd = -1;
-      reply_error(request, "cannot wait for XPC compiler process");
-    } else {
-      NSString *terminationDetail = nil;
-      @synchronized(job) {
+    @autoreleasepool {
+      int status = 0;
+      pid_t waited = 0;
+      do {
+        waited = waitpid(job.pid, &status, 0);
+      } while (waited < 0 && errno == EINTR);
+      if (waited < 0) {
+        terminate_job(job, @"Setwright XPC waiter could not reap the process group");
         job.completed = YES;
-        terminationDetail = job.terminationDetail;
+        close(job.diagnosticFd);
+        job.diagnosticFd = -1;
+        reply_error(request, "cannot wait for XPC compiler process");
+      } else {
+        NSString *terminationDetail = nil;
+        @synchronized(job) {
+          job.completed = YES;
+          terminationDetail = job.terminationDetail;
+        }
+        job.exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+        if (WIFSIGNALED(status)) {
+          NSString *detail = terminationDetail ?: [NSString stringWithFormat:
+              @"Setwright XPC compiler terminated by signal %d", WTERMSIG(status)];
+          dprintf(job.diagnosticFd, "%s\n", detail.UTF8String);
+        }
+        close(job.diagnosticFd);
+        job.diagnosticFd = -1;
+        xpc_object_t reply = xpc_dictionary_create_reply(request);
+        xpc_dictionary_set_int64(reply, "exitCode", job.exitCode);
+        xpc_connection_send_message(xpc_dictionary_get_remote_connection(request), reply);
+        xpc_release(reply);
       }
-      job.exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
-      if (WIFSIGNALED(status)) {
-        NSString *detail = terminationDetail ?: [NSString stringWithFormat:
-            @"Setwright XPC compiler terminated by signal %d", WTERMSIG(status)];
-        dprintf(job.diagnosticFd, "%s\n", detail.UTF8String);
-      }
-      close(job.diagnosticFd);
-      job.diagnosticFd = -1;
-      xpc_object_t reply = xpc_dictionary_create_reply(request);
-      xpc_dictionary_set_int64(reply, "exitCode", job.exitCode);
-      xpc_connection_send_message(xpc_dictionary_get_remote_connection(request), reply);
-      xpc_release(reply);
+      dispatch_sync(jobsQueue, ^{ [jobs removeObjectForKey:jobId]; });
+      xpc_release(request);
     }
-    dispatch_sync(jobsQueue, ^{ [jobs removeObjectForKey:jobId]; });
-    xpc_release(request);
   });
 }
 
@@ -526,7 +530,9 @@ static void accept_peer(xpc_connection_t peer) {
     return;
   }
   xpc_connection_set_event_handler(peer, ^(xpc_object_t event) {
-    if (xpc_get_type(event) == XPC_TYPE_DICTIONARY) handle_message(event);
+    @autoreleasepool {
+      if (xpc_get_type(event) == XPC_TYPE_DICTIONARY) handle_message(event);
+    }
   });
   xpc_connection_activate(peer);
 }
@@ -534,7 +540,9 @@ static void accept_peer(xpc_connection_t peer) {
 int main(void) {
   @autoreleasepool {
     jobsQueue = dispatch_queue_create("org.setwright.compiler-xpc.jobs", DISPATCH_QUEUE_SERIAL);
-    jobs = [NSMutableDictionary dictionary];
+    // The XPC service is built without ARC. This registry must outlive every
+    // per-message autorelease pool for the lifetime of the service process.
+    jobs = [[NSMutableDictionary alloc] init];
     xpc_main(accept_peer);
   }
   return 0;
