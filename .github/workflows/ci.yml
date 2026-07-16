@@ -185,12 +185,21 @@ jobs:
 
           keychain="$RUNNER_TEMP/setwright-test-signing.keychain-db"
           keychain_password="$(uuidgen)"
+          signing_config=src-tauri/native/macos/SetwrightCompilerXPC/test-signing.cnf
           openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -subj '/CN=Setwright CI Test Root/O=Setwright/' \
+            -config "$signing_config" -extensions test_root \
+            -keyout "$RUNNER_TEMP/setwright-test-root.key" \
+            -out "$RUNNER_TEMP/setwright-test-root.crt"
+          openssl req -new -newkey rsa:2048 -nodes \
             -subj '/CN=Setwright CI Test Signing/OU=SETWRIGHTCI/O=Setwright/' \
-            -addext 'basicConstraints=critical,CA:TRUE' \
-            -addext 'keyUsage=critical,digitalSignature,keyCertSign' \
-            -addext 'extendedKeyUsage=codeSigning' \
             -keyout "$RUNNER_TEMP/setwright-test-signing.key" \
+            -out "$RUNNER_TEMP/setwright-test-signing.csr"
+          openssl x509 -req -days 1 -set_serial 1 \
+            -in "$RUNNER_TEMP/setwright-test-signing.csr" \
+            -CA "$RUNNER_TEMP/setwright-test-root.crt" \
+            -CAkey "$RUNNER_TEMP/setwright-test-root.key" \
+            -extfile "$signing_config" -extensions code_signing_leaf \
             -out "$RUNNER_TEMP/setwright-test-signing.crt"
           pkcs12_legacy=''
           if openssl pkcs12 -help 2>&1 | grep -q -- '-legacy'; then
@@ -199,6 +208,7 @@ jobs:
           openssl pkcs12 -export $pkcs12_legacy \
             -inkey "$RUNNER_TEMP/setwright-test-signing.key" \
             -in "$RUNNER_TEMP/setwright-test-signing.crt" \
+            -certfile "$RUNNER_TEMP/setwright-test-root.crt" \
             -passout "pass:$keychain_password" \
             -out "$RUNNER_TEMP/setwright-test-signing.p12"
           security create-keychain -p "$keychain_password" "$keychain"
@@ -208,7 +218,7 @@ jobs:
             -k "$keychain" -P "$keychain_password" -T /usr/bin/codesign
           sudo -n security add-trusted-cert -d -r trustRoot \
             -k /Library/Keychains/System.keychain \
-            "$RUNNER_TEMP/setwright-test-signing.crt"
+            "$RUNNER_TEMP/setwright-test-root.crt"
           security set-key-partition-list -S apple-tool:,apple: -s \
             -k "$keychain_password" "$keychain"
           security list-keychains -d user -s "$keychain"
