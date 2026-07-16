@@ -103,6 +103,155 @@ jobs:
           cargo run --manifest-path src-tauri/Cargo.toml --bin export_bindings
           git diff --exit-code -- src/lib/bindings.ts
 
+  sandbox-containment:
+    name: Sandbox containment (${{ matrix.os }})
+    needs: frontend
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-22.04
+          - windows-2022
+          - macos-14
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Restore the verified frontend
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: frontend-dist
+          path: dist
+      - name: Install Linux containment build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf meson libcap-dev libseccomp-dev musl-tools
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: 1.95.0
+      - name: Install static Linux fixture target
+        if: runner.os == 'Linux'
+        run: rustup target add x86_64-unknown-linux-musl
+      - name: Build pinned bubblewrap and seccomp policy
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/setwright-bwrap"
+          git -C "$RUNNER_TEMP/setwright-bwrap" init
+          git -C "$RUNNER_TEMP/setwright-bwrap" remote add origin https://github.com/containers/bubblewrap.git
+          git -C "$RUNNER_TEMP/setwright-bwrap" fetch --depth 1 origin refs/tags/v0.11.0
+          git -C "$RUNNER_TEMP/setwright-bwrap" checkout --detach 9ca3b05ec787acfb4b17bed37db5719fa777834f
+          test "$(git -C "$RUNNER_TEMP/setwright-bwrap" rev-parse HEAD)" = 9ca3b05ec787acfb4b17bed37db5719fa777834f
+          meson setup "$RUNNER_TEMP/setwright-bwrap/build" "$RUNNER_TEMP/setwright-bwrap" \
+            -Dselinux=disabled -Dtests=false -Dman=disabled \
+            -Dbash_completion=disabled -Dzsh_completion=disabled
+          meson compile -C "$RUNNER_TEMP/setwright-bwrap/build" bwrap
+          cc tools/sandbox/linux_seccomp_filter.c -lseccomp -o "$RUNNER_TEMP/make-setwright-seccomp"
+          "$RUNNER_TEMP/make-setwright-seccomp" "$RUNNER_TEMP/setwright-seccomp.bpf"
+          "$RUNNER_TEMP/setwright-bwrap/build/bwrap" --version
+          sha256sum "$RUNNER_TEMP/setwright-bwrap/build/bwrap" "$RUNNER_TEMP/setwright-seccomp.bpf"
+      - name: Build static Linux hostile helper
+        if: runner.os == 'Linux'
+        run: cargo build --manifest-path src-tauri/Cargo.toml --bin sandbox-hostile-fixture --target x86_64-unknown-linux-musl
+      - name: Assemble test-signed macOS XPC host
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --manifest-path src-tauri/Cargo.toml --bin sandbox-hostile-fixture
+          cargo test --manifest-path src-tauri/Cargo.toml --test sandbox_containment --no-run
+          test_binary=$(find src-tauri/target/debug/deps -type f -name 'sandbox_containment-*' -perm -111 | head -n 1)
+          test -n "$test_binary"
+
+          app="$RUNNER_TEMP/SetwrightContainment.app"
+          service="$app/Contents/XPCServices/SetwrightCompilerXPC.xpc"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/tex-runtime" \
+            "$service/Contents/MacOS" "$service/Contents/Resources"
+          cp src-tauri/native/macos/ContainmentHost-Info.plist "$app/Contents/Info.plist"
+          cp "$test_binary" "$app/Contents/MacOS/SetwrightContainment"
+          cp src-tauri/native/macos/SetwrightCompilerXPC/Info.plist "$service/Contents/Info.plist"
+
+          xcrun clang -fblocks -DOS_OBJECT_USE_OBJC=0 \
+            src-tauri/native/macos/SetwrightCompilerXPC/service.m \
+            -framework Foundation -framework Security \
+            -o "$service/Contents/MacOS/SetwrightCompilerXPC"
+          xcrun clang src-tauri/native/macos/SetwrightCompilerXPC/tex_launcher.c \
+            -o "$service/Contents/Resources/setwright-tex-launcher"
+
+          helper_entitlements=src-tauri/native/macos/SetwrightCompilerXPC/helper.entitlements
+          service_entitlements=src-tauri/native/macos/SetwrightCompilerXPC/service.entitlements
+          codesign --force --sign - --identifier org.setwright.desktop.tex-launcher \
+            --entitlements "$helper_entitlements" \
+            "$service/Contents/Resources/setwright-tex-launcher"
+          codesign --force --sign - --identifier org.setwright.hostile-fixture \
+            --entitlements "$helper_entitlements" \
+            src-tauri/target/debug/sandbox-hostile-fixture
+
+          SETWRIGHT_PREPARE_FIXTURE_RUNTIME=1 \
+          SETWRIGHT_XPC_RUNTIME_ROOT="$app/Contents/Resources/tex-runtime" \
+          SETWRIGHT_HOSTILE_FIXTURE_PATH="$PWD/src-tauri/target/debug/sandbox-hostile-fixture" \
+            "$test_binary" native_hostile_fixture_containment_remains_incomplete_attestation --nocapture
+          codesign --force --sign - --identifier org.setwright.desktop.compiler-xpc \
+            --entitlements "$service_entitlements" "$service"
+          codesign --force --sign - --identifier org.setwright.desktop "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+
+          group_root="$HOME/Library/Group Containers/group.org.setwright.desktop"
+          stage_root="$group_root/compile-stages"
+          runtime_root="$app/Contents/Resources/tex-runtime"
+          mkdir -p "$stage_root"
+          {
+            echo "SETWRIGHT_CONTAINMENT_APP=$app"
+            echo "SETWRIGHT_XPC_STAGE_ROOT=$stage_root"
+            echo "SETWRIGHT_XPC_RUNTIME_ROOT=$runtime_root"
+          } >> "$GITHUB_ENV"
+      - name: Run Windows AppContainer hostile fixture
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:SETWRIGHT_RUN_NATIVE_SANDBOX_PROBE = '1'
+          $env:SETWRIGHT_PROBE_EVIDENCE = Join-Path $env:RUNNER_TEMP 'sandbox-probe-windows.json'
+          cargo test --manifest-path src-tauri/Cargo.toml --test sandbox_containment native_hostile_fixture_containment_remains_incomplete_attestation -- --nocapture
+      - name: Run Linux bubblewrap hostile fixture
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export SETWRIGHT_RUN_NATIVE_SANDBOX_PROBE=1
+          export SETWRIGHT_BWRAP_PATH="$RUNNER_TEMP/setwright-bwrap/build/bwrap"
+          export SETWRIGHT_BWRAP_VERSION='bubblewrap 0.11.0'
+          export SETWRIGHT_BWRAP_SHA256="$(sha256sum "$SETWRIGHT_BWRAP_PATH" | cut -d' ' -f1)"
+          export SETWRIGHT_SECCOMP_PATH="$RUNNER_TEMP/setwright-seccomp.bpf"
+          export SETWRIGHT_SECCOMP_SHA256="$(sha256sum "$SETWRIGHT_SECCOMP_PATH" | cut -d' ' -f1)"
+          export SETWRIGHT_HOSTILE_FIXTURE_PATH="$PWD/src-tauri/target/x86_64-unknown-linux-musl/debug/sandbox-hostile-fixture"
+          export SETWRIGHT_PROBE_EVIDENCE="$RUNNER_TEMP/sandbox-probe-linux.json"
+          cargo test --manifest-path src-tauri/Cargo.toml --test sandbox_containment native_hostile_fixture_containment_remains_incomplete_attestation -- --nocapture
+      - name: Run macOS XPC hostile fixture
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export SETWRIGHT_RUN_NATIVE_SANDBOX_PROBE=1
+          export SETWRIGHT_XPC_BUNDLE="$SETWRIGHT_CONTAINMENT_APP/Contents/XPCServices/SetwrightCompilerXPC.xpc"
+          export SETWRIGHT_XPC_SERVICE_NAME='org.setwright.desktop.compiler-xpc'
+          export SETWRIGHT_XPC_REQUIREMENT='identifier "org.setwright.desktop.compiler-xpc"'
+          export SETWRIGHT_XPC_APP_GROUP='group.org.setwright.desktop'
+          export SETWRIGHT_USE_PREINSTALLED_RUNTIME=1
+          export SETWRIGHT_HOSTILE_FIXTURE_PATH="$PWD/src-tauri/target/debug/sandbox-hostile-fixture"
+          export SETWRIGHT_PROBE_EVIDENCE="$RUNNER_TEMP/sandbox-probe-macos.json"
+          "$SETWRIGHT_CONTAINMENT_APP/Contents/MacOS/SetwrightContainment" \
+            native_hostile_fixture_containment_remains_incomplete_attestation --nocapture
+      - name: Upload containment-only probe evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sandbox-probe-${{ matrix.os }}
+          path: ${{ runner.temp }}/sandbox-probe-*.json
+          if-no-files-found: error
+          retention-days: 14
+
   schemas:
     name: Public schema examples
     runs-on: ubuntu-22.04

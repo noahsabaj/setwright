@@ -13,7 +13,9 @@ use crate::services::runtime::InstalledRuntime;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 const PROBE_SCHEMA_VERSION: u32 = 1;
 const SANDBOX_POLICY_VERSION: u32 = 1;
@@ -266,6 +268,13 @@ pub struct SandboxLaunchAuthorization {
     request: SandboxLaunchRequest,
     backend: SandboxBackend,
     attestation_id: String,
+    authority: LaunchAuthority,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchAuthority {
+    ReleaseAttestation,
+    ContainmentProbe,
 }
 
 impl SandboxLaunchAuthorization {
@@ -282,6 +291,13 @@ impl SandboxLaunchAuthorization {
     #[must_use]
     pub fn attestation_id(&self) -> &str {
         &self.attestation_id
+    }
+
+    /// Probe launches exercise the real native launcher but can never produce
+    /// an attestation-bound receipt or implement the production broker trait.
+    #[must_use]
+    pub const fn is_containment_probe(&self) -> bool {
+        matches!(self.authority, LaunchAuthority::ContainmentProbe)
     }
 }
 
@@ -300,18 +316,191 @@ pub struct SandboxLaunchReceipt {
     pub platform_handle: PlatformLaunchHandle,
 }
 
+/// Complete control of a sandboxed process tree while its initial process is
+/// still suspended. Platform launchers must not resume the process themselves:
+/// the compile executor first installs this control in the cancellation token.
+pub trait SandboxProcessControl: Send + Sync {
+    fn resume(&self) -> AppResult<()>;
+    fn terminate_tree(&self) -> AppResult<()>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SandboxExitStatus {
+    pub success: bool,
+    pub exit_code: Option<i32>,
+}
+
+/// One-shot blocking waiter owned by the common executor's wait thread.
+pub trait SandboxExitWaiter: Send {
+    fn wait(self: Box<Self>) -> AppResult<SandboxExitStatus>;
+}
+
+/// The platform-owned half of a controlled launch. Its handle is opaque to the
+/// common executor; the broker turns it into an attestation-bound receipt.
+pub struct PlatformControlledProcess {
+    platform_handle: PlatformLaunchHandle,
+    control: Arc<dyn SandboxProcessControl>,
+    stdout: Box<dyn Read + Send>,
+    stderr: Box<dyn Read + Send>,
+    exit_waiter: Box<dyn SandboxExitWaiter>,
+}
+
+impl std::fmt::Debug for PlatformControlledProcess {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PlatformControlledProcess")
+            .field("platform_handle", &self.platform_handle)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PlatformControlledProcess {
+    pub fn new(
+        platform_handle: PlatformLaunchHandle,
+        control: Arc<dyn SandboxProcessControl>,
+        stdout: Box<dyn Read + Send>,
+        stderr: Box<dyn Read + Send>,
+        exit_waiter: Box<dyn SandboxExitWaiter>,
+    ) -> AppResult<Self> {
+        if platform_handle.opaque_id.trim().is_empty() {
+            return Err(compile_unavailable(
+                "platform sandbox launcher returned an empty job handle",
+            ));
+        }
+        Ok(Self {
+            platform_handle,
+            control,
+            stdout,
+            stderr,
+            exit_waiter,
+        })
+    }
+
+    #[must_use]
+    pub fn platform_handle(&self) -> &PlatformLaunchHandle {
+        &self.platform_handle
+    }
+
+    #[must_use]
+    pub fn control(&self) -> Arc<dyn SandboxProcessControl> {
+        Arc::clone(&self.control)
+    }
+
+    pub fn resume(&self) -> AppResult<()> {
+        self.control.resume()
+    }
+
+    pub fn into_io(
+        self,
+    ) -> (
+        Box<dyn Read + Send>,
+        Box<dyn Read + Send>,
+        Box<dyn SandboxExitWaiter>,
+    ) {
+        (self.stdout, self.stderr, self.exit_waiter)
+    }
+}
+
+/// An attestation-bound, initially suspended child. All process authority and
+/// inherited I/O is explicit and owned; dropping an arbitrary `Child` handle
+/// can never silently detach a compiler process.
+pub struct ControlledSandboxChild {
+    receipt: SandboxLaunchReceipt,
+    control: Arc<dyn SandboxProcessControl>,
+    stdout: Box<dyn Read + Send>,
+    stderr: Box<dyn Read + Send>,
+    exit_waiter: Box<dyn SandboxExitWaiter>,
+}
+
+impl std::fmt::Debug for ControlledSandboxChild {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ControlledSandboxChild")
+            .field("receipt", &self.receipt)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ControlledSandboxChild {
+    #[must_use]
+    pub fn receipt(&self) -> &SandboxLaunchReceipt {
+        &self.receipt
+    }
+
+    #[must_use]
+    pub fn control(&self) -> Arc<dyn SandboxProcessControl> {
+        Arc::clone(&self.control)
+    }
+
+    pub fn resume(&self) -> AppResult<()> {
+        self.control.resume()
+    }
+
+    pub fn into_io(
+        self,
+    ) -> (
+        Box<dyn Read + Send>,
+        Box<dyn Read + Send>,
+        Box<dyn SandboxExitWaiter>,
+    ) {
+        (self.stdout, self.stderr, self.exit_waiter)
+    }
+}
+
 /// Implemented only by an OS-specific AppContainer/XPC/bubblewrap service.
 /// The frontend cannot provide executable paths or invoke this trait.
 pub trait PlatformSandboxLauncher: Send + Sync {
     fn launch_attested(
         &self,
         authorization: &SandboxLaunchAuthorization,
-    ) -> AppResult<PlatformLaunchHandle>;
+    ) -> AppResult<PlatformControlledProcess>;
 }
 
 pub trait SandboxBroker: Send + Sync {
     fn readiness(&self) -> SandboxReadiness;
-    fn launch(&self, request: &SandboxLaunchRequest) -> AppResult<SandboxLaunchReceipt>;
+    fn launch(&self, request: &SandboxLaunchRequest) -> AppResult<ControlledSandboxChild>;
+}
+
+/// Bootstrap path for hostile-fixture containment probes. This validates the
+/// same launch request and calls the same platform launcher as production, but
+/// deliberately returns only the platform-owned child. It does not implement
+/// [`SandboxBroker`], cannot mint a [`SandboxLaunchReceipt`], and therefore
+/// cannot be installed in [`crate::services::compiler::SandboxedCompileExecutor`].
+#[derive(Debug)]
+pub struct SandboxProbeRunner<L> {
+    launcher: L,
+}
+
+impl<L> SandboxProbeRunner<L>
+where
+    L: PlatformSandboxLauncher,
+{
+    #[must_use]
+    pub const fn new(launcher: L) -> Self {
+        Self { launcher }
+    }
+
+    pub fn launch_fixture(
+        &self,
+        request: &SandboxLaunchRequest,
+    ) -> AppResult<PlatformControlledProcess> {
+        validate_launch_request(request)?;
+        let backend = current_sandbox_backend()?;
+        if request.job.spec.sandbox.backend != backend {
+            return Err(compile_unavailable(
+                "containment probe request targets a different sandbox backend",
+            ));
+        }
+        self.launcher.launch_attested(&SandboxLaunchAuthorization {
+            request: request.clone(),
+            backend,
+            attestation_id: format!(
+                "containment-probe-v{PROBE_SCHEMA_VERSION}:{}",
+                request.runtime_manifest_sha256
+            ),
+            authority: LaunchAuthority::ContainmentProbe,
+        })
+    }
 }
 
 /// Production-safe default until a target's release-risk sandbox spike has
@@ -355,7 +544,7 @@ impl SandboxBroker for FailClosedSandboxBroker {
         }
     }
 
-    fn launch(&self, _request: &SandboxLaunchRequest) -> AppResult<SandboxLaunchReceipt> {
+    fn launch(&self, _request: &SandboxLaunchRequest) -> AppResult<ControlledSandboxChild> {
         Err(compile_unavailable(self.reason.clone()))
     }
 }
@@ -393,7 +582,7 @@ where
         SandboxReadiness::from(&self.attestation)
     }
 
-    fn launch(&self, request: &SandboxLaunchRequest) -> AppResult<SandboxLaunchReceipt> {
+    fn launch(&self, request: &SandboxLaunchRequest) -> AppResult<ControlledSandboxChild> {
         validate_launch_request(request)?;
         if request.job.spec.sandbox.backend != self.attestation.backend
             || request.job.spec.runtime_id != self.attestation.profile_id
@@ -407,18 +596,21 @@ where
             request: request.clone(),
             backend: self.attestation.backend,
             attestation_id: self.attestation.attestation_id.clone(),
+            authority: LaunchAuthority::ReleaseAttestation,
         };
-        let platform_handle = self.launcher.launch_attested(&authorization)?;
-        if platform_handle.opaque_id.trim().is_empty() {
-            return Err(compile_unavailable(
-                "platform sandbox launcher returned an empty job handle",
-            ));
-        }
-        Ok(SandboxLaunchReceipt {
+        let platform = self.launcher.launch_attested(&authorization)?;
+        let receipt = SandboxLaunchReceipt {
             job_id: request.job.job_id,
             backend: self.attestation.backend,
             attestation_id: self.attestation.attestation_id.clone(),
-            platform_handle,
+            platform_handle: platform.platform_handle,
+        };
+        Ok(ControlledSandboxChild {
+            receipt,
+            control: platform.control,
+            stdout: platform.stdout,
+            stderr: platform.stderr,
+            exit_waiter: platform.exit_waiter,
         })
     }
 }
@@ -740,20 +932,82 @@ mod tests {
         assert!(matches!(result, Err(AppError::CompileUnavailable { .. })));
     }
 
+    #[test]
+    fn containment_only_evidence_cannot_unlock_compilation() {
+        let mut evidence = current_evidence();
+        match &mut evidence {
+            SandboxProbeEvidence::WindowsAppContainer(evidence) => {
+                evidence.common.pdflatex_passed = false;
+                evidence.common.xelatex_passed = false;
+                evidence.common.bibtex_passed = false;
+                evidence.common.biber_passed = false;
+                evidence.common.synctex_passed = false;
+            }
+            SandboxProbeEvidence::MacosXpcAppSandbox(evidence) => {
+                evidence.common.pdflatex_passed = false;
+                evidence.common.xelatex_passed = false;
+                evidence.common.bibtex_passed = false;
+                evidence.common.biber_passed = false;
+                evidence.common.synctex_passed = false;
+            }
+            SandboxProbeEvidence::LinuxBubblewrap(evidence) => {
+                evidence.common.pdflatex_passed = false;
+                evidence.common.xelatex_passed = false;
+                evidence.common.bibtex_passed = false;
+                evidence.common.biber_passed = false;
+                evidence.common.synctex_passed = false;
+            }
+        }
+        assert!(matches!(
+            SandboxAttestation::verify_for_current_host(evidence),
+            Err(AppError::CompileUnavailable { .. })
+        ));
+    }
+
     #[derive(Debug, Clone)]
     struct RecordingLauncher {
         calls: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug)]
+    struct RecordingControl;
+
+    impl SandboxProcessControl for RecordingControl {
+        fn resume(&self) -> AppResult<()> {
+            Ok(())
+        }
+
+        fn terminate_tree(&self) -> AppResult<()> {
+            Ok(())
+        }
+    }
+
+    struct CompletedWaiter;
+
+    impl SandboxExitWaiter for CompletedWaiter {
+        fn wait(self: Box<Self>) -> AppResult<SandboxExitStatus> {
+            Ok(SandboxExitStatus {
+                success: true,
+                exit_code: Some(0),
+            })
+        }
     }
 
     impl PlatformSandboxLauncher for RecordingLauncher {
         fn launch_attested(
             &self,
             _authorization: &SandboxLaunchAuthorization,
-        ) -> AppResult<PlatformLaunchHandle> {
+        ) -> AppResult<PlatformControlledProcess> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(PlatformLaunchHandle {
-                opaque_id: "test-handle".into(),
-            })
+            PlatformControlledProcess::new(
+                PlatformLaunchHandle {
+                    opaque_id: "test-handle".into(),
+                },
+                Arc::new(RecordingControl),
+                Box::new(std::io::Cursor::new(Vec::<u8>::new())),
+                Box::new(std::io::Cursor::new(Vec::<u8>::new())),
+                Box::new(CompletedWaiter),
+            )
         }
     }
 
@@ -795,8 +1049,8 @@ mod tests {
         )
         .unwrap();
         let (_root, request) = request_fixture();
-        let receipt = broker.launch(&request).unwrap();
-        assert_eq!(receipt.job_id, request.job().job_id);
+        let child = broker.launch(&request).unwrap();
+        assert_eq!(child.receipt().job_id, request.job().job_id);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
         let mut weakened = request.clone();

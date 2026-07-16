@@ -272,6 +272,7 @@ fn fixed_latexmk_command(engine: LatexEngine, main_file: &str) -> CommandModel {
             "-file-line-error".into(),
             "-synctex=1".into(),
             "-recorder".into(),
+            "-outdir=output".into(),
             format!("-max_repeat={}", CompileLimits::PREVIEW.max_tex_passes),
             main_file.into(),
         ],

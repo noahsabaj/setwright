@@ -25,3 +25,10 @@ completed; a claim without reproducible evidence does not close a gate.
 There are currently no signed release artifacts. Do not change this document to
 `Complete` merely because a workflow uploaded an unsigned artifact or a local
 machine had TeX installed.
+
+The `Sandbox containment` CI matrix is deliberately non-closing evidence. It
+runs a test-signed hostile native fixture through AppContainer, an embedded XPC
+service, or pinned bubblewrap and uploads the existing probe schema with all
+real-TeX workflow fields false. The test also requires attestation rejection.
+The three containment rows remain `Open` until signed TeX Live profiles pass on
+clean machines using packaged release-candidate binaries.

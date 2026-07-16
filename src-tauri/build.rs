@@ -14,6 +14,19 @@ fn main() {
         bibtex_source.join("parser.h").display()
     );
 
+    #[cfg(target_os = "macos")]
+    {
+        let bridge = std::path::Path::new("native/macos/setwright_xpc_bridge.m");
+        cc::Build::new()
+            .file(bridge)
+            .flag("-fblocks")
+            .define("OS_OBJECT_USE_OBJC", "0")
+            .compile("setwright_xpc_bridge");
+        println!("cargo:rerun-if-changed={}", bridge.display());
+        println!("cargo:rustc-link-lib=framework=Foundation");
+        println!("cargo:rustc-link-lib=framework=Security");
+    }
+
     // `tauri_build` emits the single application resource manifest, including
     // the Common-Controls v6 dependency required by native dialogs. A second
     // linker manifest collides with Tauri's `resource.lib`.

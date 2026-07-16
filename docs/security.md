@@ -80,3 +80,17 @@ policy objects.
 Current status: this repository does not yet claim that those platform gates,
 production signing keys, managed-runtime hosting, or independent security
 review are complete. See [release readiness](release-readiness.md).
+
+## Containment spike evidence
+
+The native CI spike installs an Ed25519 test-signed runtime whose fixed
+`latexmk` tool is a host-native hostile helper. It exercises the same broker,
+suspended-child control, stream draining, cancellation, and native launcher
+used by compilation. The helper probes outside/original writes, DNS and HTTP,
+fixed shell/rc arguments, child survival, memory, process count, and aggregate
+writable output.
+
+The workflow emits `SandboxProbeEvidence`, but intentionally leaves pdfLaTeX,
+XeLaTeX, BibTeX, Biber, and SyncTeX false. `SandboxAttestation` must reject that
+evidence. These fixture runs are prototype containment evidence only; they are
+not signed TeX Live or packaged-release acceptance evidence.
