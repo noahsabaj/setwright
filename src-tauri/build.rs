@@ -20,7 +20,6 @@ fn main() {
         cc::Build::new()
             .file(bridge)
             .flag("-fblocks")
-            .define("OS_OBJECT_USE_OBJC", "0")
             .compile("setwright_xpc_bridge");
         println!("cargo:rerun-if-changed={}", bridge.display());
         println!("cargo:rustc-link-lib=framework=Foundation");

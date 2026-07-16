@@ -75,32 +75,6 @@ static BOOL verify_code(NSString *path, NSString *requirementText) {
   return status == errSecSuccess;
 }
 
-static BOOL verify_peer(xpc_connection_t peer) {
-  audit_token_t token = {};
-  xpc_connection_get_audit_token(peer, &token);
-  CFDataRef audit = CFDataCreate(kCFAllocatorDefault, (const UInt8 *)&token,
-                                 sizeof(token));
-  const void *keys[] = {kSecGuestAttributeAudit};
-  const void *values[] = {audit};
-  CFDictionaryRef attributes = CFDictionaryCreate(
-      kCFAllocatorDefault, keys, values, 1, &kCFTypeDictionaryKeyCallBacks,
-      &kCFTypeDictionaryValueCallBacks);
-  SecCodeRef code = NULL;
-  OSStatus status = SecCodeCopyGuestWithAttributes(NULL, attributes,
-                                                   kSecCSDefaultFlags, &code);
-  CFRelease(attributes);
-  CFRelease(audit);
-  if (status != errSecSuccess || code == NULL) return NO;
-  SecRequirementRef requirement = NULL;
-  status = SecRequirementCreateWithString(CFSTR(SETWRIGHT_HOST_REQUIREMENT),
-                                          kSecCSDefaultFlags, &requirement);
-  if (status == errSecSuccess)
-    status = SecCodeCheckValidity(code, kSecCSStrictValidate, requirement);
-  if (requirement != NULL) CFRelease(requirement);
-  CFRelease(code);
-  return status == errSecSuccess;
-}
-
 static NSArray<NSNumber *> *process_tree(pid_t root) {
   NSMutableArray<NSNumber *> *result = [NSMutableArray array];
   NSMutableArray<NSNumber *> *pending = [NSMutableArray arrayWithObject:@(root)];
@@ -398,7 +372,11 @@ int main(void) {
     jobsQueue = dispatch_queue_create("org.setwright.compiler-xpc.jobs", DISPATCH_QUEUE_SERIAL);
     jobs = [NSMutableDictionary dictionary];
     xpc_main(^(xpc_connection_t peer) {
-      if (!verify_peer(peer)) { xpc_connection_cancel(peer); return; }
+      if (xpc_connection_set_peer_code_signing_requirement(
+              peer, SETWRIGHT_HOST_REQUIREMENT) != 0) {
+        xpc_connection_cancel(peer);
+        return;
+      }
       xpc_connection_set_event_handler(peer, ^(xpc_object_t event) {
         if (xpc_get_type(event) == XPC_TYPE_DICTIONARY) handle_message(event);
       });

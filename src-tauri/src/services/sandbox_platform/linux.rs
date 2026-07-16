@@ -5,7 +5,7 @@ use crate::services::sandbox::{
 };
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -254,10 +254,11 @@ impl SandboxProcessControl for LinuxProcessControl {
             .resume
             .lock()
             .map_err(|_| unavailable("bubblewrap resume control was poisoned"))?;
-        let mut fd = resume
+        let fd = resume
             .take()
             .ok_or_else(|| unavailable("bubblewrap resume control is unavailable"))?;
-        fd.write_all(&[1])
+        File::from(fd)
+            .write_all(&[1])
             .map_err(|error| unavailable(format!("resume bubblewrap sandbox: {error}")))?;
         Ok(())
     }

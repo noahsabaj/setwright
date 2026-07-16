@@ -8,7 +8,6 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::os::fd::FromRawFd;
 use std::path::{Path, PathBuf};
-use std::ptr::null_mut;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 

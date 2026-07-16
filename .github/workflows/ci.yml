@@ -174,7 +174,7 @@ jobs:
           cp "$test_binary" "$app/Contents/MacOS/SetwrightContainment"
           cp src-tauri/native/macos/SetwrightCompilerXPC/Info.plist "$service/Contents/Info.plist"
 
-          xcrun clang -fblocks -DOS_OBJECT_USE_OBJC=0 \
+          xcrun clang -fblocks \
             src-tauri/native/macos/SetwrightCompilerXPC/service.m \
             -framework Foundation -framework Security \
             -o "$service/Contents/MacOS/SetwrightCompilerXPC"
