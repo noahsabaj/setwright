@@ -10,7 +10,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
@@ -111,8 +111,6 @@ fn cancellation_mode() {
         .expect("write hostile parent pid");
     let mut child = Command::new(std::env::current_exe().expect("locate hostile fixture"))
         .arg("--fixture-child")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
         .spawn()
         .expect("spawn hostile child");
     fs::write("output/child.pid", child.id().to_string()).expect("write hostile child pid");
@@ -146,12 +144,7 @@ fn process_count_mode() {
     let executable = std::env::current_exe().expect("locate hostile fixture");
     let mut children = Vec::new();
     loop {
-        match Command::new(&executable)
-            .arg("--fixture-child")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
+        match Command::new(&executable).arg("--fixture-child").spawn() {
             Ok(child) => children.push(child),
             Err(error) => {
                 let _ = fs::write("output/process-limit.txt", error.to_string());

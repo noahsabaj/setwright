@@ -367,21 +367,23 @@ static void handle_message(xpc_object_t request) {
   else reply_error(request, "unsupported XPC operation");
 }
 
+static void accept_peer(xpc_connection_t peer) {
+  if (xpc_connection_set_peer_code_signing_requirement(
+          peer, SETWRIGHT_HOST_REQUIREMENT) != 0) {
+    xpc_connection_cancel(peer);
+    return;
+  }
+  xpc_connection_set_event_handler(peer, ^(xpc_object_t event) {
+    if (xpc_get_type(event) == XPC_TYPE_DICTIONARY) handle_message(event);
+  });
+  xpc_connection_activate(peer);
+}
+
 int main(void) {
   @autoreleasepool {
     jobsQueue = dispatch_queue_create("org.setwright.compiler-xpc.jobs", DISPATCH_QUEUE_SERIAL);
     jobs = [NSMutableDictionary dictionary];
-    xpc_main(^(xpc_connection_t peer) {
-      if (xpc_connection_set_peer_code_signing_requirement(
-              peer, SETWRIGHT_HOST_REQUIREMENT) != 0) {
-        xpc_connection_cancel(peer);
-        return;
-      }
-      xpc_connection_set_event_handler(peer, ^(xpc_object_t event) {
-        if (xpc_get_type(event) == XPC_TYPE_DICTIONARY) handle_message(event);
-      });
-      xpc_connection_activate(peer);
-    });
+    xpc_main(accept_peer);
   }
   return 0;
 }
