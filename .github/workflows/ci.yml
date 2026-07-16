@@ -194,13 +194,13 @@ jobs:
           requirements_header="$RUNNER_TEMP/setwright-signing-requirements.h"
           {
             printf '#define SETWRIGHT_HOST_REQUIREMENT "certificate root = H\\"%s\\" and identifier \\"org.setwright.desktop\\""\n' "$root_sha1"
-            printf '#define SETWRIGHT_HELPER_REQUIREMENT "certificate root = H\\"%s\\" and entitlement[\\"com.apple.security.inherit\\"] = true"\n' "$root_sha1"
+            printf '#define SETWRIGHT_HELPER_REQUIREMENT "certificate root = H\\"%s\\" and entitlement[\\"com.apple.security.inherit\\"] exists"\n' "$root_sha1"
           } > "$requirements_header"
           printf -v host_requirement \
             'certificate root = H"%s" and identifier "org.setwright.desktop"' \
             "$root_sha1"
           printf -v helper_requirement \
-            'certificate root = H"%s" and entitlement["com.apple.security.inherit"] = true' \
+            'certificate root = H"%s" and entitlement["com.apple.security.inherit"] exists' \
             "$root_sha1"
           printf -v service_requirement \
             'certificate root = H"%s" and identifier "org.setwright.desktop.compiler-xpc"' \

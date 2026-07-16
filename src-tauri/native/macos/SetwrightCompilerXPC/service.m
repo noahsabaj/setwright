@@ -29,7 +29,7 @@
 #endif
 #ifndef SETWRIGHT_HELPER_REQUIREMENT
 #define SETWRIGHT_HELPER_REQUIREMENT \
-  "anchor apple generic and certificate leaf[subject.OU] = \"SETWRIGHT_TEAM_ID_REQUIRED\" and entitlement[\"com.apple.security.inherit\"] = true"
+  "anchor apple generic and certificate leaf[subject.OU] = \"SETWRIGHT_TEAM_ID_REQUIRED\" and entitlement[\"com.apple.security.inherit\"] exists"
 #endif
 
 extern char **environ;
@@ -41,7 +41,9 @@ extern char **environ;
 @property(nonatomic, copy) NSString *outputRoot;
 @property(atomic) BOOL completed;
 @property(atomic) BOOL resumed;
+@property(atomic) BOOL waiting;
 @property(atomic) BOOL watchdogReady;
+@property(atomic) BOOL lifecycleTransactionOpen;
 @property(atomic, copy) NSString *terminationDetail;
 @property(nonatomic) int diagnosticFd;
 @property(nonatomic) int exitCode;
@@ -203,6 +205,17 @@ static int terminate_job(SWJob *job, NSString *detail) {
     job.terminationDetail = detail;
     return 0;
   }
+}
+
+static void end_lifecycle_transaction(SWJob *job) {
+  BOOL shouldEnd = NO;
+  @synchronized(job) {
+    if (job.lifecycleTransactionOpen) {
+      job.lifecycleTransactionOpen = NO;
+      shouldEnd = YES;
+    }
+  }
+  if (shouldEnd) xpc_transaction_end();
 }
 
 static void start_watchdog(NSString *jobId, SWJob *job) {
@@ -435,6 +448,22 @@ static void handle_launch(xpc_object_t request) {
     return;
   }
   xpc_object_t reply = xpc_dictionary_create_reply(request);
+  if (reply == NULL) {
+    job.completed = YES;
+    kill(-pid, SIGKILL);
+    waitpid(pid, NULL, 0);
+    close(job.diagnosticFd);
+    job.diagnosticFd = -1;
+    close(stdoutPipe[0]);
+    close(stderrPipe[0]);
+    dispatch_sync(jobsQueue, ^{ [jobs removeObjectForKey:jobId]; });
+    return;
+  }
+  // The launch reply ends XPC's automatic transaction, but the compiler is
+  // still suspended and owned by this service. Keep the service live until a
+  // wait request creates the long-lived asynchronous reply transaction.
+  xpc_transaction_begin();
+  job.lifecycleTransactionOpen = YES;
   xpc_dictionary_set_string(reply, "jobId", jobId.UTF8String);
   xpc_dictionary_set_int64(reply, "pid", pid);
   xpc_dictionary_set_fd(reply, "stdout", stdoutPipe[0]);
@@ -495,7 +524,24 @@ static void handle_wait(xpc_object_t request) {
   NSString *jobId = nil;
   SWJob *job = lookup_job(request, &jobId);
   if (job == nil) { reply_error(request, "unknown XPC compile job"); return; }
-  xpc_retain(request);
+  xpc_object_t reply = xpc_dictionary_create_reply(request);
+  if (reply == NULL) {
+    reply_error(request, "cannot allocate XPC wait reply");
+    return;
+  }
+  @synchronized(job) {
+    if (job.waiting) {
+      xpc_release(reply);
+      reply_error(request, "XPC compiler process already has a waiter");
+      return;
+    }
+    job.waiting = YES;
+  }
+  xpc_connection_t peer = xpc_dictionary_get_remote_connection(request);
+  xpc_retain(peer);
+  // Creating `reply` keeps the automatic message transaction open while the
+  // asynchronous wait runs, so the explicit launch transaction can end now.
+  end_lifecycle_transaction(job);
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
     @autoreleasepool {
       int status = 0;
@@ -508,7 +554,8 @@ static void handle_wait(xpc_object_t request) {
         job.completed = YES;
         close(job.diagnosticFd);
         job.diagnosticFd = -1;
-        reply_error(request, "cannot wait for XPC compiler process");
+        xpc_dictionary_set_string(reply, "error",
+                                  "cannot wait for XPC compiler process");
       } else {
         NSString *terminationDetail = nil;
         @synchronized(job) {
@@ -523,13 +570,12 @@ static void handle_wait(xpc_object_t request) {
         }
         close(job.diagnosticFd);
         job.diagnosticFd = -1;
-        xpc_object_t reply = xpc_dictionary_create_reply(request);
         xpc_dictionary_set_int64(reply, "exitCode", job.exitCode);
-        xpc_connection_send_message(xpc_dictionary_get_remote_connection(request), reply);
-        xpc_release(reply);
       }
+      xpc_connection_send_message(peer, reply);
+      xpc_release(reply);
+      xpc_release(peer);
       dispatch_sync(jobsQueue, ^{ [jobs removeObjectForKey:jobId]; });
-      xpc_release(request);
     }
   });
 }
