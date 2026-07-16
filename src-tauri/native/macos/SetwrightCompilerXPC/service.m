@@ -32,7 +32,6 @@ extern char **environ;
 
 @interface SWJob : NSObject
 @property(nonatomic) pid_t pid;
-@property(nonatomic) uint64_t memoryLimit;
 @property(nonatomic) uint64_t writableLimit;
 @property(nonatomic) uint32_t processLimit;
 @property(nonatomic, copy) NSString *outputRoot;
@@ -87,59 +86,79 @@ static OSStatus verify_code(NSString *path, NSString *requirementText) {
   return status;
 }
 
-static NSArray<NSNumber *> *process_tree(pid_t root, BOOL *valid) {
-  NSMutableArray<NSNumber *> *result = [NSMutableArray array];
+typedef struct {
+  BOOL valid;
+  BOOL exceeded;
+  NSUInteger count;
+} SWProcessInspection;
+
+// App Sandbox permits the service to enumerate its own descendants but does
+// not grant task-inspection access for proc_pid_rusage. Keep the process-count
+// enforcement here and bound every allocation/traversal by the configured
+// limit so a fork storm cannot livelock the watchdog itself.
+static SWProcessInspection inspect_process_limit(pid_t root, uint32_t limit) {
+  SWProcessInspection inspection = {.valid = YES, .exceeded = NO, .count = 0};
+  if (root <= 0 || limit == 0) {
+    inspection.valid = NO;
+    return inspection;
+  }
+  NSMutableSet<NSNumber *> *seen = [NSMutableSet set];
   NSMutableArray<NSNumber *> *pending = [NSMutableArray arrayWithObject:@(root)];
-  *valid = YES;
   while (pending.count > 0) {
     NSNumber *next = pending.lastObject;
     [pending removeLastObject];
-    if ([result containsObject:next]) continue;
-    [result addObject:next];
-    int count = proc_listchildpids(next.intValue, NULL, 0);
-    if (count < 0) {
-      *valid = NO;
-      return @[];
+    if ([seen containsObject:next]) continue;
+    if (seen.count >= limit) {
+      inspection.exceeded = YES;
+      inspection.count = seen.count + 1;
+      return inspection;
     }
-    if (count == 0) continue;
-    pid_t *children = calloc((size_t)count, sizeof(pid_t));
+    [seen addObject:next];
+
+    errno = 0;
+    int reported = proc_listchildpids(next.intValue, NULL, 0);
+    if (reported < 0) {
+      if (errno == ESRCH && next.intValue != root) continue;
+      inspection.valid = NO;
+      return inspection;
+    }
+    if (reported == 0) continue;
+
+    NSUInteger outstanding = seen.count + pending.count;
+    NSUInteger remaining = outstanding < limit ? limit - outstanding : 0;
+    // One extra slot is sufficient to prove a violation and keeps the buffer
+    // bounded even if the hostile tree is growing while it is sampled.
+    size_t slots = MIN((size_t)reported, (size_t)remaining + 1);
+    pid_t *children = calloc(slots, sizeof(pid_t));
     if (children == NULL) {
-      *valid = NO;
-      return @[];
+      inspection.valid = NO;
+      return inspection;
     }
     // Unlike proc_listpids, proc_listchildpids returns a PID count.
     int childCount = proc_listchildpids(next.intValue, children,
-                                        count * (int)sizeof(pid_t));
+                                        (int)(slots * sizeof(pid_t)));
     if (childCount < 0) {
       free(children);
-      *valid = NO;
-      return @[];
+      if (errno == ESRCH && next.intValue != root) continue;
+      inspection.valid = NO;
+      return inspection;
     }
-    if (childCount > 0) {
-      for (int index = 0; index < childCount; index++)
-        [pending addObject:@(children[index])];
+    for (int index = 0; index < childCount; index++) {
+      NSNumber *child = @(children[index]);
+      if (children[index] <= 0 || [seen containsObject:child] ||
+          [pending containsObject:child]) continue;
+      if (seen.count + pending.count >= limit) {
+        free(children);
+        inspection.exceeded = YES;
+        inspection.count = seen.count + pending.count + 1;
+        return inspection;
+      }
+      [pending addObject:child];
     }
     free(children);
   }
-  return result;
-}
-
-static uint64_t resident_bytes(NSArray<NSNumber *> *processes, BOOL *valid) {
-  uint64_t total = 0;
-  *valid = YES;
-  for (NSNumber *process in processes) {
-    struct rusage_info_v2 usage = {};
-    if (proc_pid_rusage(process.intValue, RUSAGE_INFO_V2,
-                        (rusage_info_t *)&usage) != 0) {
-      *valid = NO;
-      return 0;
-    }
-    if (__builtin_add_overflow(total, usage.ri_resident_size, &total)) {
-      *valid = NO;
-      return 0;
-    }
-  }
-  return total;
+  inspection.count = seen.count;
+  return inspection;
 }
 
 static uint64_t directory_bytes(NSString *root, BOOL *valid) {
@@ -185,23 +204,17 @@ static void start_watchdog(NSString *jobId, SWJob *job) {
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
     unsigned invalidSamples = 0;
     while (!job.completed) {
-      BOOL treeValid = NO;
-      BOOL memoryValid = NO;
       BOOL outputValid = NO;
-      NSArray<NSNumber *> *processes = process_tree(job.pid, &treeValid);
-      uint64_t memory = resident_bytes(processes, &memoryValid);
+      SWProcessInspection processes =
+          inspect_process_limit(job.pid, job.processLimit);
       uint64_t output = directory_bytes(job.outputRoot, &outputValid);
       NSString *violation = nil;
-      if (treeValid && memoryValid && outputValid) {
+      if (processes.valid && outputValid) {
         invalidSamples = 0;
-        if (processes.count > job.processLimit) {
+        if (processes.exceeded) {
           violation = [NSString stringWithFormat:
               @"process count %lu exceeded limit %u",
               (unsigned long)processes.count, job.processLimit];
-        } else if (memory > job.memoryLimit) {
-          violation = [NSString stringWithFormat:
-              @"resident memory %llu exceeded limit %llu", memory,
-              job.memoryLimit];
         } else if (output > job.writableLimit) {
           violation = [NSString stringWithFormat:
               @"writable output %llu exceeded limit %llu", output,
@@ -209,8 +222,8 @@ static void start_watchdog(NSString *jobId, SWJob *job) {
         }
       } else if (++invalidSamples >= 3) {
         violation = [NSString stringWithFormat:
-            @"resource inspection failed (tree=%d memory=%d output=%d)",
-            treeValid, memoryValid, outputValid];
+            @"resource inspection failed (processes=%d output=%d)",
+            processes.valid, outputValid];
       }
       if (violation != nil) {
         int terminationError = terminate_job(
@@ -341,6 +354,10 @@ static void handle_launch(xpc_object_t request) {
   uint64_t memory = xpc_dictionary_get_uint64(request, "memoryLimit");
   uint64_t writable = xpc_dictionary_get_uint64(request, "writableLimit");
   uint64_t processLimit = xpc_dictionary_get_uint64(request, "processLimit");
+  if (memory == 0 || writable == 0 || processLimit == 0 || processLimit > 4096) {
+    reply_error(request, "invalid XPC resource limits");
+    return;
+  }
   char memoryText[32], writableText[32];
   snprintf(memoryText, sizeof(memoryText), "%llu", memory);
   snprintf(writableText, sizeof(writableText), "%llu", writable);
@@ -387,7 +404,6 @@ static void handle_launch(xpc_object_t request) {
   NSString *jobId = NSUUID.UUID.UUIDString;
   SWJob *job = [SWJob new];
   job.pid = pid;
-  job.memoryLimit = memory;
   job.writableLimit = writable;
   job.processLimit = (uint32_t)MIN(processLimit, UINT32_MAX);
   job.outputRoot = output;
@@ -395,6 +411,7 @@ static void handle_launch(xpc_object_t request) {
   dispatch_sync(jobsQueue, ^{ jobs[jobId] = job; });
   xpc_object_t reply = xpc_dictionary_create_reply(request);
   xpc_dictionary_set_string(reply, "jobId", jobId.UTF8String);
+  xpc_dictionary_set_int64(reply, "pid", pid);
   xpc_dictionary_set_fd(reply, "stdout", stdoutPipe[0]);
   xpc_dictionary_set_fd(reply, "stderr", stderrPipe[0]);
   xpc_connection_send_message(xpc_dictionary_get_remote_connection(request), reply);
@@ -435,8 +452,14 @@ static void handle_control(xpc_object_t request, NSString *operation) {
     }
     start_watchdog(jobId, job);
   } else if ([operation isEqualToString:@"terminate"]) {
+    const char *reasonText = xpc_dictionary_get_string(request, "reason");
+    NSString *reason = @"Setwright XPC broker terminated the process group";
+    if (reasonText != NULL && strlen(reasonText) > 0 && strlen(reasonText) <= 512) {
+      reason = [@"Setwright XPC broker: " stringByAppendingString:
+          [NSString stringWithUTF8String:reasonText]];
+    }
     int terminationError = terminate_job(
-        job, @"Setwright XPC broker terminated the process group");
+        job, reason);
     if (terminationError != 0 && terminationError != ESRCH) {
       reply_error(request, "cannot terminate XPC process group"); return;
     }

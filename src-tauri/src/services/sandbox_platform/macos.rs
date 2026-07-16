@@ -10,6 +10,8 @@ use std::os::fd::FromRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
 
 const ERROR_BUFFER_BYTES: usize = 1024;
 const JOB_ID_BYTES: usize = 128;
@@ -43,6 +45,7 @@ unsafe extern "C" {
         process_limit: u32,
         stdout_fd: *mut c_int,
         stderr_fd: *mut c_int,
+        root_pid: *mut i32,
         job_id: *mut c_char,
         job_id_length: usize,
         error: *mut c_char,
@@ -57,6 +60,7 @@ unsafe extern "C" {
     fn sw_xpc_terminate(
         client: *mut c_void,
         job_id: *const c_char,
+        reason: *const c_char,
         error: *mut c_char,
         error_length: usize,
     ) -> c_int;
@@ -64,6 +68,13 @@ unsafe extern "C" {
         client: *mut c_void,
         job_id: *const c_char,
         exit_code: *mut i32,
+        error: *mut c_char,
+        error_length: usize,
+    ) -> c_int;
+    fn sw_process_tree_resident_bytes(
+        root_pid: i32,
+        process_limit: u32,
+        resident_bytes: *mut u64,
         error: *mut c_char,
         error_length: usize,
     ) -> c_int;
@@ -208,6 +219,7 @@ fn launch_xpc(
         .collect();
     let mut stdout_fd = -1;
     let mut stderr_fd = -1;
+    let mut root_pid = 0_i32;
     let mut job_id = [0_i8; JOB_ID_BYTES];
     let mut error = [0_i8; ERROR_BUFFER_BYTES];
     let launched = unsafe {
@@ -226,6 +238,7 @@ fn launch_xpc(
             u32::from(spec.limits.max_child_processes).saturating_add(1),
             &mut stdout_fd,
             &mut stderr_fd,
+            &mut root_pid,
             job_id.as_mut_ptr(),
             job_id.len(),
             error.as_mut_ptr(),
@@ -233,7 +246,7 @@ fn launch_xpc(
         )
     };
     ffi_result(launched, &error, "launch sandboxed XPC compile helper")?;
-    if stdout_fd < 0 || stderr_fd < 0 {
+    if stdout_fd < 0 || stderr_fd < 0 || root_pid <= 0 {
         return Err(unavailable("XPC service returned invalid stream handles"));
     }
     let job_id = unsafe { CStr::from_ptr(job_id.as_ptr()) }
@@ -243,9 +256,13 @@ fn launch_xpc(
     let state = Arc::new(XpcJob {
         client,
         job_id,
+        root_pid,
+        memory_limit: spec.limits.memory_bytes,
+        process_limit: u32::from(spec.limits.max_child_processes).saturating_add(1),
         resumed: AtomicBool::new(false),
         finished: AtomicBool::new(false),
     });
+    start_memory_watchdog(&state);
     let stdout: Box<dyn Read + Send> = Box::new(unsafe { File::from_raw_fd(stdout_fd) });
     let stderr: Box<dyn Read + Send> = Box::new(unsafe { File::from_raw_fd(stderr_fd) });
     let control: Arc<dyn SandboxProcessControl> = state.clone();
@@ -296,6 +313,9 @@ unsafe impl Sync for XpcClient {}
 struct XpcJob {
     client: Arc<XpcClient>,
     job_id: CString,
+    root_pid: i32,
+    memory_limit: u64,
+    process_limit: u32,
     resumed: AtomicBool,
     finished: AtomicBool,
 }
@@ -317,6 +337,22 @@ impl XpcJob {
         };
         ffi_result(result, &error, label)
     }
+
+    fn terminate_with_reason(&self, reason: &str, label: &str) -> AppResult<()> {
+        let reason =
+            CString::new(reason).map_err(|_| unavailable("XPC termination reason contains NUL"))?;
+        let mut error = [0_i8; ERROR_BUFFER_BYTES];
+        let result = unsafe {
+            sw_xpc_terminate(
+                self.client.raw(),
+                self.job_id.as_ptr(),
+                reason.as_ptr(),
+                error.as_mut_ptr(),
+                error.len(),
+            )
+        };
+        ffi_result(result, &error, label)
+    }
 }
 
 impl SandboxProcessControl for XpcJob {
@@ -328,16 +364,81 @@ impl SandboxProcessControl for XpcJob {
     }
 
     fn terminate_tree(&self) -> AppResult<()> {
-        self.operation(sw_xpc_terminate, "terminate XPC compiler process group")
+        self.terminate_with_reason(
+            "cancellation requested",
+            "terminate XPC compiler process group",
+        )
     }
 }
 
 impl Drop for XpcJob {
     fn drop(&mut self) {
         if !self.finished.load(Ordering::Acquire) {
-            let _ = self.operation(sw_xpc_terminate, "terminate dropped XPC compiler job");
+            let _ = self.terminate_with_reason(
+                "broker dropped the compile job",
+                "terminate dropped XPC compiler job",
+            );
         }
     }
+}
+
+fn start_memory_watchdog(state: &Arc<XpcJob>) {
+    let state = Arc::downgrade(state);
+    thread::spawn(move || {
+        let mut invalid_samples = 0_u8;
+        loop {
+            let Some(job) = state.upgrade() else {
+                break;
+            };
+            if job.finished.load(Ordering::Acquire) {
+                break;
+            }
+            if !job.resumed.load(Ordering::Acquire) {
+                drop(job);
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+
+            let mut resident_bytes = 0_u64;
+            let mut error = [0_i8; ERROR_BUFFER_BYTES];
+            let result = unsafe {
+                sw_process_tree_resident_bytes(
+                    job.root_pid,
+                    job.process_limit,
+                    &mut resident_bytes,
+                    error.as_mut_ptr(),
+                    error.len(),
+                )
+            };
+            if result == 0 {
+                invalid_samples = 0;
+                if resident_bytes > job.memory_limit {
+                    let reason = format!(
+                        "resident memory {resident_bytes} exceeded limit {}",
+                        job.memory_limit
+                    );
+                    let _ = job.terminate_with_reason(
+                        &reason,
+                        "terminate XPC compiler after memory limit",
+                    );
+                    break;
+                }
+            } else {
+                invalid_samples = invalid_samples.saturating_add(1);
+                if invalid_samples >= 3 {
+                    let detail = ffi_message(&error);
+                    let reason = format!("memory inspection failed: {detail}");
+                    let _ = job.terminate_with_reason(
+                        &reason,
+                        "terminate XPC compiler after memory inspection failure",
+                    );
+                    break;
+                }
+            }
+            drop(job);
+            thread::sleep(Duration::from_millis(10));
+        }
+    });
 }
 
 struct XpcExitWaiter {
@@ -357,8 +458,8 @@ impl SandboxExitWaiter for XpcExitWaiter {
                 error.len(),
             )
         };
-        ffi_result(result, &error, "wait for XPC compiler process")?;
         self.state.finished.store(true, Ordering::Release);
+        ffi_result(result, &error, "wait for XPC compiler process")?;
         Ok(SandboxExitStatus {
             success: exit_code == 0,
             exit_code: Some(exit_code),
@@ -389,14 +490,18 @@ fn ffi_result(result: c_int, error: &[c_char], operation: &str) -> AppResult<()>
 }
 
 fn ffi_error(error: &[c_char], operation: &str) -> AppError {
-    let message = if error.first().copied().unwrap_or_default() == 0 {
+    let message = ffi_message(error);
+    unavailable(format!("{operation}: {message}"))
+}
+
+fn ffi_message(error: &[c_char]) -> String {
+    if error.first().copied().unwrap_or_default() == 0 {
         "native XPC bridge returned no detail".into()
     } else {
         unsafe { CStr::from_ptr(error.as_ptr()) }
             .to_string_lossy()
             .into_owned()
-    };
-    unavailable(format!("{operation}: {message}"))
+    }
 }
 
 fn unavailable(message: impl Into<String>) -> AppError {

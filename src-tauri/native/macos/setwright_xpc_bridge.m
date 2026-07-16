@@ -2,6 +2,8 @@
 #import <Security/Security.h>
 #import <xpc/xpc.h>
 #include <errno.h>
+#include <libproc.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -158,8 +160,8 @@ int sw_xpc_launch(void *opaque, const char *runtime_root, const char *stage_root
                   const char *const *environment_values, size_t environment_count,
                   uint64_t memory_limit, uint64_t writable_limit,
                   uint32_t process_limit, int *stdout_fd, int *stderr_fd,
-                  char *job_id, size_t job_id_length, char *error_buffer,
-                  size_t error_length) {
+                  int32_t *root_pid, char *job_id, size_t job_id_length,
+                  char *error_buffer, size_t error_length) {
   sw_xpc_client *client = opaque;
   xpc_object_t message = xpc_dictionary_create(NULL, NULL, 0);
   xpc_dictionary_set_string(message, "operation", "launch");
@@ -184,9 +186,11 @@ int sw_xpc_launch(void *opaque, const char *runtime_root, const char *stage_root
   xpc_release(message);
   if (reply == NULL) return EIO;
   const char *remote_job_id = xpc_dictionary_get_string(reply, "jobId");
+  int64_t remote_pid = xpc_dictionary_get_int64(reply, "pid");
   int out = xpc_dictionary_dup_fd(reply, "stdout");
   int err = xpc_dictionary_dup_fd(reply, "stderr");
-  if (remote_job_id == NULL || out < 0 || err < 0) {
+  if (remote_job_id == NULL || remote_pid <= 0 || remote_pid > INT32_MAX ||
+      out < 0 || err < 0 || root_pid == NULL) {
     if (out >= 0) close(out);
     if (err >= 0) close(err);
     xpc_release(reply);
@@ -194,6 +198,7 @@ int sw_xpc_launch(void *opaque, const char *runtime_root, const char *stage_root
     return EPROTO;
   }
   snprintf(job_id, job_id_length, "%s", remote_job_id);
+  *root_pid = (int32_t)remote_pid;
   *stdout_fd = out;
   *stderr_fd = err;
   xpc_release(reply);
@@ -201,12 +206,14 @@ int sw_xpc_launch(void *opaque, const char *runtime_root, const char *stage_root
 }
 
 static int sw_job_command(void *opaque, const char *operation,
-                          const char *job_id, int32_t *exit_code,
+                          const char *job_id, const char *reason,
+                          int32_t *exit_code,
                           char *error_buffer, size_t error_length) {
   sw_xpc_client *client = opaque;
   xpc_object_t message = xpc_dictionary_create(NULL, NULL, 0);
   xpc_dictionary_set_string(message, "operation", operation);
   xpc_dictionary_set_string(message, "jobId", job_id);
+  if (reason != NULL) xpc_dictionary_set_string(message, "reason", reason);
   xpc_object_t reply = sw_send(client, message, error_buffer, error_length);
   xpc_release(message);
   if (reply == NULL) return EIO;
@@ -218,15 +225,105 @@ static int sw_job_command(void *opaque, const char *operation,
 
 int sw_xpc_resume(void *opaque, const char *job_id, char *error_buffer,
                   size_t error_length) {
-  return sw_job_command(opaque, "resume", job_id, NULL, error_buffer, error_length);
+  return sw_job_command(opaque, "resume", job_id, NULL, NULL,
+                        error_buffer, error_length);
 }
 
-int sw_xpc_terminate(void *opaque, const char *job_id, char *error_buffer,
-                     size_t error_length) {
-  return sw_job_command(opaque, "terminate", job_id, NULL, error_buffer, error_length);
+int sw_xpc_terminate(void *opaque, const char *job_id, const char *reason,
+                     char *error_buffer, size_t error_length) {
+  return sw_job_command(opaque, "terminate", job_id, reason, NULL,
+                        error_buffer, error_length);
 }
 
 int sw_xpc_wait(void *opaque, const char *job_id, int32_t *exit_code,
                 char *error_buffer, size_t error_length) {
-  return sw_job_command(opaque, "wait", job_id, exit_code, error_buffer, error_length);
+  return sw_job_command(opaque, "wait", job_id, NULL, exit_code,
+                        error_buffer, error_length);
+}
+
+int sw_process_tree_resident_bytes(int32_t root_pid, uint32_t process_limit,
+                                   uint64_t *resident_bytes,
+                                   char *error_buffer, size_t error_length) {
+  @autoreleasepool {
+    if (root_pid <= 0 || process_limit == 0 || process_limit > 4096 ||
+        resident_bytes == NULL) {
+      sw_error(error_buffer, error_length, @"invalid process-tree memory request");
+      return EINVAL;
+    }
+    NSMutableSet<NSNumber *> *seen = [NSMutableSet set];
+    NSMutableArray<NSNumber *> *pending =
+        [NSMutableArray arrayWithObject:@(root_pid)];
+    uint64_t total = 0;
+    while (pending.count > 0) {
+      NSNumber *next = pending.lastObject;
+      [pending removeLastObject];
+      if ([seen containsObject:next]) continue;
+      if (seen.count >= process_limit) {
+        sw_error(error_buffer, error_length,
+                 @"process tree exceeded its bounded memory-inspection limit");
+        return EOVERFLOW;
+      }
+      [seen addObject:next];
+
+      struct rusage_info_v2 usage = {};
+      errno = 0;
+      if (proc_pid_rusage(next.intValue, RUSAGE_INFO_V2,
+                          (rusage_info_t *)&usage) != 0) {
+        if (errno == ESRCH && next.intValue != root_pid) continue;
+        sw_error(error_buffer, error_length,
+                 @"cannot inspect process-tree resident memory");
+        return errno == 0 ? EIO : errno;
+      }
+      if (__builtin_add_overflow(total, usage.ri_resident_size, &total)) {
+        sw_error(error_buffer, error_length,
+                 @"process-tree resident memory overflowed");
+        return EOVERFLOW;
+      }
+
+      errno = 0;
+      int reported = proc_listchildpids(next.intValue, NULL, 0);
+      if (reported < 0) {
+        if (errno == ESRCH && next.intValue != root_pid) continue;
+        sw_error(error_buffer, error_length,
+                 @"cannot enumerate process-tree descendants");
+        return errno == 0 ? EIO : errno;
+      }
+      if (reported == 0) continue;
+      NSUInteger outstanding = seen.count + pending.count;
+      NSUInteger remaining = outstanding < process_limit
+          ? process_limit - outstanding : 0;
+      size_t slots = MIN((size_t)reported, (size_t)remaining + 1);
+      pid_t *children = calloc(slots, sizeof(pid_t));
+      if (children == NULL) {
+        sw_error(error_buffer, error_length,
+                 @"cannot allocate bounded process-tree sample");
+        return ENOMEM;
+      }
+      int child_count = proc_listchildpids(
+          next.intValue, children, (int)(slots * sizeof(pid_t)));
+      if (child_count < 0) {
+        int child_error = errno;
+        free(children);
+        if (child_error == ESRCH && next.intValue != root_pid) continue;
+        sw_error(error_buffer, error_length,
+                 @"cannot enumerate process-tree descendants");
+        return child_error == 0 ? EIO : child_error;
+      }
+      for (int index = 0; index < child_count; index++) {
+        NSNumber *child = @(children[index]);
+        if (children[index] <= 0 || [seen containsObject:child] ||
+            [pending containsObject:child]) continue;
+        if (seen.count + pending.count >= process_limit) {
+          free(children);
+          sw_error(error_buffer, error_length,
+                   @"process tree exceeded its bounded memory-inspection limit");
+          return EOVERFLOW;
+        }
+        [pending addObject:child];
+      }
+      free(children);
+    }
+    *resident_bytes = total;
+    return 0;
+  }
 }
