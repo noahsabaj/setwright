@@ -1,11 +1,21 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../App";
 import { resetMockBridge } from "../lib/bridge";
 import { useWorkspaceStore } from "../store/workspace-store";
 
 vi.mock("mathlive", () => ({}));
+vi.mock("../components/PreviewPane", () => ({
+  PreviewPane: () => <section aria-label="Compiled PDF preview">No PDF compiled</section>,
+}));
+
+beforeAll(async () => {
+  // Warm App's production lazy boundary outside an individual test timeout.
+  // The workspace behavior is exercised below; chunk loading is covered by
+  // the browser and native production-build suites.
+  await import("../components/WorkspaceShell");
+});
 
 async function enterDemoWorkspace() {
   const user = userEvent.setup();

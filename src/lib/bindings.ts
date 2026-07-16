@@ -21,6 +21,7 @@ export const commands = {
 	renameCitationKey: (sessionId: ProjectSessionId, baseRevision: Revision, bibliographyFileId: FileId, oldKey: string, newKey: string) => typedError<UiEditResult, CitationCommandError>(__TAURI_INVOKE("rename_citation_key", { sessionId, baseRevision, bibliographyFileId, oldKey, newKey })),
 	lookupCitationMetadata: (sessionId: ProjectSessionId, request: MetadataLookupRequest) => typedError<MetadataLookupResponse, CitationCommandError>(__TAURI_INVOKE("lookup_citation_metadata", { sessionId, request })),
 	getRuntimeReadiness: () => __TAURI_INVOKE<RuntimeReadiness>("get_runtime_readiness"),
+	getWebviewRuntimeInfo: () => __TAURI_INVOKE<WebviewRuntimeInfo>("get_webview_runtime_info"),
 	startCompile: (sessionId: ProjectSessionId, revision: Revision, engine: LatexEngine) => typedError<CompileTicket, AppError>(__TAURI_INVOKE("start_compile", { sessionId, revision, engine })),
 	cancelCompile: (sessionId: ProjectSessionId, jobId: CompileJobId) => typedError<null, AppError>(__TAURI_INVOKE("cancel_compile", { sessionId, jobId })),
 	readCompilePdf: (sessionId: ProjectSessionId) => typedError<UiPdfArtifact, AppError>(__TAURI_INVOKE("read_compile_pdf", { sessionId })),
@@ -610,6 +611,17 @@ export type Utf8ConversionPreview = {
 };
 
 export type VisualNodeKind = "paragraph" | "heading" | "quote" | "list" | "footnote" | "theorem" | "definition" | "proof" | "codeListing" | "citation" | "crossReference" | "inlineEquation" | "displayEquation" | "figure" | "table" | "rawInline" | "rawBlock";
+
+export type WebviewEngine = "webview2" | "webkit" | "webkitgtk" | "unknown";
+
+export type WebviewRuntimeInfo = {
+	engine: WebviewEngine,
+	detectedVersion: string | null,
+	minimumVersion: string | null,
+	comparison: WebviewVersionComparison,
+};
+
+export type WebviewVersionComparison = "meets-floor" | "below-floor" | "not-comparable";
 
 /* Tauri Specta runtime */
 async function typedError<T, E>(result: Promise<T>): Promise<{ status: "ok"; data: T } | { status: "error"; error: E }> {

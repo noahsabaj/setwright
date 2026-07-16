@@ -127,6 +127,12 @@ void sw_xpc_disconnect(void *opaque) {
   free(client);
 }
 
+void sw_xpc_cancel(void *opaque) {
+  sw_xpc_client *client = opaque;
+  if (client == NULL) return;
+  xpc_connection_cancel(client->connection);
+}
+
 static xpc_object_t sw_send(sw_xpc_client *client, xpc_object_t message,
                             char *error_buffer, size_t error_length) {
   if (client == NULL) {
@@ -158,7 +164,7 @@ int sw_xpc_launch(void *opaque, const char *runtime_root, const char *stage_root
                   const char *output_root, const char *const *arguments,
                   size_t argument_count, const char *const *environment_keys,
                   const char *const *environment_values, size_t environment_count,
-                  uint64_t memory_limit, uint64_t writable_limit,
+                  uint64_t timeout_ms, uint64_t memory_limit, uint64_t writable_limit,
                   uint32_t process_limit, int *stdout_fd, int *stderr_fd,
                   int32_t *root_pid, char *job_id, size_t job_id_length,
                   char *error_buffer, size_t error_length) {
@@ -168,6 +174,7 @@ int sw_xpc_launch(void *opaque, const char *runtime_root, const char *stage_root
   xpc_dictionary_set_string(message, "runtimeRoot", runtime_root);
   xpc_dictionary_set_string(message, "stageRoot", stage_root);
   xpc_dictionary_set_string(message, "outputRoot", output_root);
+  xpc_dictionary_set_uint64(message, "timeoutMs", timeout_ms);
   xpc_dictionary_set_uint64(message, "memoryLimit", memory_limit);
   xpc_dictionary_set_uint64(message, "writableLimit", writable_limit);
   xpc_dictionary_set_uint64(message, "processLimit", process_limit);

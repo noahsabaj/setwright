@@ -11,9 +11,37 @@ pub fn run() {
     use tauri::{Emitter, Manager};
 
     let command_builder = ipc::command_builder();
-    tauri::Builder::default()
+    let context = tauri::generate_context!();
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_fs::init());
+    #[cfg(feature = "pdf-preview-e2e")]
+    let builder = {
+        use tauri::utils::config::CapabilityEntry;
+
+        let dedicated_config_enabled = context.config().app.with_global_tauri
+            && context
+                .config()
+                .app
+                .security
+                .capabilities
+                .iter()
+                .any(|entry| {
+                    matches!(
+                        entry,
+                        CapabilityEntry::Inlined(capability)
+                            if capability.identifier == "pdf-preview-e2e"
+                    )
+                });
+        if dedicated_config_enabled {
+            builder
+                .plugin(tauri_plugin_wdio::init())
+                .plugin(tauri_plugin_wdio_webdriver::init())
+        } else {
+            builder
+        }
+    };
+    builder
         .invoke_handler(command_builder.invoke_handler())
         .setup(move |app| {
             command_builder.mount_events(app);
@@ -39,6 +67,6 @@ pub fn run() {
                 _ => {}
             }
         })
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running Setwright");
 }

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeBuildCommand": "pnpm build:pdf-e2e"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "security": {
+      "capabilities": [
+        "main-window",
+        {
+          "identifier": "pdf-preview-e2e",
+          "description": "Test-only PDF preview automation capability",
+          "windows": ["main"],
+          "permissions": ["wdio:default", "wdio-webdriver:default"]
+        }
+      ]
+    }
+  },
+  "bundle": {
+    "active": false
+  }
+}

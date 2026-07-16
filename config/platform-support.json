@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "browser": {
+    "chromiumMinimumMajor": 125,
+    "safariMinimumMajor": 18
+  },
+  "windows": {
+    "webview2Minimum": "125.0.2535.41",
+    "updateModel": "evergreen"
+  },
+  "macos": {
+    "minimumSystemVersion": "15.0",
+    "updatePolicy": "current-system-updates"
+  },
+  "linux": {
+    "distribution": "ubuntu",
+    "minimumRelease": "22.04",
+    "updatePolicy": "current-security-updates"
+  }
+}

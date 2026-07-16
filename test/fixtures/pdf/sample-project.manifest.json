@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "sample-project",
+  "sourceDirectory": "sample-project",
+  "pdf": "test/fixtures/pdf/sample-project.pdf",
+  "sha256": "01fe33bf01f3e80ed62ce7e4f281277dfaf6b6d91e3e300b9337d29029faddbb",
+  "byteLength": 285949,
+  "pageCount": 2,
+  "sourceDateEpoch": "1735689600",
+  "containerImage": "ghcr.io/xu-cheng/texlive-historic-alpine@sha256:73a48f4fc1d3ee7357c8ea5d274af161541c0981432da33339eed7ac1f8e083d",
+  "command": [
+    "latexmk",
+    "-pdf",
+    "-norc",
+    "-file-line-error",
+    "-halt-on-error",
+    "-interaction=nonstopmode",
+    "main.tex"
+  ]
+}

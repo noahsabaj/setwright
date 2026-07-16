@@ -45,6 +45,13 @@ struct BoundaryResult {
     latexmkrc_ignored: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProcessCountResult {
+    successful_children: usize,
+    error: Option<String>,
+}
+
 struct ProbeRun {
     stage: PathBuf,
     status: SandboxExitStatus,
@@ -174,7 +181,7 @@ fn run_suite<L>(
     );
     let process_count = run_mode(&runner, runtime, root, "process-count", &outside, &original);
     assert!(
-        !process_count.status.success,
+        process_count.trigger_observed && !process_count.status.success,
         "process limit did not terminate the hostile fixture: {}",
         display_run(&process_count)
     );
@@ -227,7 +234,7 @@ fn run_suite<L>(
         process_tree_killed: cancellation.trigger_observed && !cancellation.status.success,
         memory_limit_enforced: !memory.status.success,
         writable_limit_enforced: !writable.status.success,
-        child_limit_enforced: !process_count.status.success,
+        child_limit_enforced: process_count.trigger_observed && !process_count.status.success,
         // A hostile native helper is not a TeX Live workflow attestation.
         pdflatex_passed: false,
         xelatex_passed: false,
@@ -266,16 +273,6 @@ where
     let output = stage.join("output");
     fs::create_dir_all(&output).unwrap();
     fs::write(stage.join("main.tex"), b"fixture").unwrap();
-    fs::write(
-        stage.join("probe.json"),
-        serde_json::to_vec(&serde_json::json!({
-            "mode": mode,
-            "outsideCanary": outside,
-            "originalProjectCanary": original,
-        }))
-        .unwrap(),
-    )
-    .unwrap();
     let backend = current_sandbox_backend().unwrap();
     let spec = CompileSpec::preview(
         runtime.profile_id(),
@@ -284,6 +281,18 @@ where
         backend,
     )
     .unwrap();
+    fs::write(
+        stage.join("probe.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "mode": mode,
+            "outsideCanary": outside,
+            "originalProjectCanary": original,
+            "maxChildProcesses": spec.limits.max_child_processes,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let max_child_processes = spec.limits.max_child_processes;
     let job = CompileJob::new(
         ProjectSessionId::new(),
         Revision::INITIAL,
@@ -310,14 +319,10 @@ where
         let _ = status_tx.send(waiter.wait());
     });
 
-    let marker = match mode {
-        "cancellation" => Some(stage.join("output/child.pid")),
-        "process-count" => Some(stage.join("output/process-limit.txt")),
-        _ => None,
-    };
     let mut trigger_observed = false;
     let mut early_status = None;
-    if let Some(marker) = marker {
+    if mode == "cancellation" {
+        let marker = stage.join("output/child.pid");
         let deadline = Instant::now() + Duration::from_secs(45);
         while Instant::now() < deadline {
             if marker.exists() {
@@ -328,7 +333,6 @@ where
             match status_rx.try_recv() {
                 Ok(status) => {
                     early_status = Some(status.unwrap());
-                    trigger_observed = mode == "process-count";
                     break;
                 }
                 Err(mpsc::TryRecvError::Disconnected) => panic!("sandbox waiter disconnected"),
@@ -337,6 +341,83 @@ where
         }
         if !trigger_observed && early_status.is_none() {
             control.terminate_tree().unwrap();
+        }
+    } else if mode == "process-count" {
+        let armed_marker = stage.join("output/process-limit-armed.json");
+        let blocked_marker = stage.join("output/process-spawn-blocked.json");
+        let breached_marker = stage.join("output/process-limit-breached.json");
+        let deadline = Instant::now() + Duration::from_secs(45);
+        while Instant::now() < deadline {
+            if blocked_marker.exists() {
+                let armed: ProcessCountResult = serde_json::from_slice(
+                    &fs::read(&armed_marker).expect("read armed process-limit evidence"),
+                )
+                .expect("decode armed process-limit evidence");
+                let result: ProcessCountResult = serde_json::from_slice(
+                    &fs::read(&blocked_marker).expect("read process rejection evidence"),
+                )
+                .expect("decode process rejection evidence");
+                assert_eq!(
+                    armed.successful_children,
+                    usize::from(max_child_processes),
+                    "process-limit probe was armed at the wrong threshold"
+                );
+                assert_eq!(
+                    result.successful_children,
+                    usize::from(max_child_processes),
+                    "native process limit rejected a child at the wrong threshold"
+                );
+                assert!(
+                    result
+                        .error
+                        .as_deref()
+                        .is_some_and(|error| !error.is_empty()),
+                    "native process-limit rejection omitted its OS error"
+                );
+                trigger_observed = true;
+                control.terminate_tree().unwrap();
+                break;
+            }
+            match status_rx.try_recv() {
+                Ok(status) => {
+                    let status = status.unwrap();
+                    if armed_marker.exists() {
+                        let armed: ProcessCountResult = serde_json::from_slice(
+                            &fs::read(&armed_marker).expect("read armed process-limit evidence"),
+                        )
+                        .expect("decode armed process-limit evidence");
+                        assert_eq!(
+                            armed.successful_children,
+                            usize::from(max_child_processes),
+                            "process-limit probe was armed at the wrong threshold"
+                        );
+                        trigger_observed = !status.success;
+                    }
+                    early_status = Some(status);
+                    break;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => panic!("sandbox waiter disconnected"),
+                Err(mpsc::TryRecvError::Empty) => thread::sleep(Duration::from_millis(25)),
+            }
+        }
+        if !trigger_observed && early_status.is_none() {
+            let detail = if breached_marker.exists() {
+                let result: ProcessCountResult = serde_json::from_slice(
+                    &fs::read(&breached_marker).expect("read process-limit breach evidence"),
+                )
+                .expect("decode process-limit breach evidence");
+                format!(
+                    "watchdog left {} children alive after the configured limit was exceeded",
+                    result.successful_children
+                )
+            } else if !armed_marker.exists() {
+                "hostile fixture exited before reaching the configured process limit".to_owned()
+            } else {
+                "hostile fixture reached the configured process limit but never crossed it"
+                    .to_owned()
+            };
+            control.terminate_tree().unwrap();
+            eprintln!("process-count containment failure: {detail}");
         }
     }
 

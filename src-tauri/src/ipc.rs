@@ -542,6 +542,32 @@ pub struct RuntimeReadiness {
     pub reason: String,
 }
 
+#[derive(specta::Type, Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum WebviewEngine {
+    Webview2,
+    Webkit,
+    Webkitgtk,
+    Unknown,
+}
+
+#[derive(specta::Type, Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum WebviewVersionComparison {
+    MeetsFloor,
+    BelowFloor,
+    NotComparable,
+}
+
+#[derive(specta::Type, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WebviewRuntimeInfo {
+    pub engine: WebviewEngine,
+    pub detected_version: Option<String>,
+    pub minimum_version: Option<String>,
+    pub comparison: WebviewVersionComparison,
+}
+
 #[derive(specta::Type, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenedProjectWindow {
@@ -1060,6 +1086,85 @@ pub fn get_runtime_readiness(state: State<'_, DesktopState>) -> RuntimeReadiness
                 .into(),
         },
     }
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn get_webview_runtime_info() -> WebviewRuntimeInfo {
+    let detected_version = tauri::webview_version().ok();
+    let platform_support: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../config/platform-support.json"
+    )))
+    .expect("config/platform-support.json must be valid JSON");
+    let configured_minimum = |pointer: &str| {
+        platform_support
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| panic!("platform support policy is missing {pointer}"))
+    };
+    #[cfg(target_os = "windows")]
+    let (engine, minimum_version) = (
+        WebviewEngine::Webview2,
+        Some(configured_minimum("/windows/webview2Minimum")),
+    );
+    #[cfg(target_os = "macos")]
+    let (engine, minimum_version) = (
+        WebviewEngine::Webkit,
+        Some(configured_minimum("/macos/minimumSystemVersion")),
+    );
+    #[cfg(target_os = "linux")]
+    let (engine, minimum_version) = (
+        WebviewEngine::Webkitgtk,
+        Some(configured_minimum("/linux/minimumRelease")),
+    );
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    let (engine, minimum_version) = (WebviewEngine::Unknown, None);
+
+    #[cfg(target_os = "windows")]
+    let comparison = match (&detected_version, &minimum_version) {
+        (Some(detected), Some(minimum)) => match compare_dotted_versions(detected, minimum) {
+            Some(std::cmp::Ordering::Less) => WebviewVersionComparison::BelowFloor,
+            Some(_) => WebviewVersionComparison::MeetsFloor,
+            None => WebviewVersionComparison::NotComparable,
+        },
+        _ => WebviewVersionComparison::NotComparable,
+    };
+    #[cfg(not(target_os = "windows"))]
+    let comparison = WebviewVersionComparison::NotComparable;
+
+    WebviewRuntimeInfo {
+        engine,
+        detected_version,
+        minimum_version,
+        comparison,
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn compare_dotted_versions(left: &str, right: &str) -> Option<std::cmp::Ordering> {
+    let parse = |value: &str| {
+        value
+            .split('.')
+            .map(str::parse::<u64>)
+            .collect::<Result<Vec<_>, _>>()
+            .ok()
+    };
+    let left = parse(left)?;
+    let right = parse(right)?;
+    let width = left.len().max(right.len());
+    for index in 0..width {
+        let ordering = left
+            .get(index)
+            .copied()
+            .unwrap_or_default()
+            .cmp(&right.get(index).copied().unwrap_or_default());
+        if ordering != std::cmp::Ordering::Equal {
+            return Some(ordering);
+        }
+    }
+    Some(std::cmp::Ordering::Equal)
 }
 
 #[tauri::command]
@@ -1871,6 +1976,7 @@ pub fn command_builder() -> tauri_specta::Builder<tauri::Wry> {
             rename_citation_key,
             lookup_citation_metadata,
             get_runtime_readiness,
+            get_webview_runtime_info,
             start_compile,
             cancel_compile,
             read_compile_pdf,
@@ -3182,6 +3288,24 @@ mod tests {
         assert!(bindings.contains("prepareUtf8Conversion"));
         assert!(bindings.contains("convertFileToUtf8"));
         assert!(bindings.contains("readCompilePdf"));
+        assert!(bindings.contains("getWebviewRuntimeInfo"));
         assert!(bindings.contains("setwright-compile-event"));
+    }
+
+    #[test]
+    fn dotted_webview_versions_compare_without_lexicographic_errors() {
+        assert_eq!(
+            compare_dotted_versions("125.0.2535.41", "125.0.2535.41"),
+            Some(std::cmp::Ordering::Equal)
+        );
+        assert_eq!(
+            compare_dotted_versions("126.0.0", "125.0.2535.41"),
+            Some(std::cmp::Ordering::Greater)
+        );
+        assert_eq!(
+            compare_dotted_versions("124.99", "125.0.2535.41"),
+            Some(std::cmp::Ordering::Less)
+        );
+        assert_eq!(compare_dotted_versions("not-a-version", "125.0"), None);
     }
 }

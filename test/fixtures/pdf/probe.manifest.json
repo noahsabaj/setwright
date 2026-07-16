@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "id": "pdf-capability-probe",
+  "generatedBy": "src/lib/pdf-probe-fixture.ts",
+  "sha256": "137a07612d530b29102095fdc6685439f430a91cc4df26ff19c416297e858c54",
+  "byteLength": 748,
+  "pageCount": 2,
+  "content": "Page 1 has a red vector region; page 2 has a blue vector region."
+}
