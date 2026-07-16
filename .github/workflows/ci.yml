@@ -168,8 +168,8 @@ jobs:
 
           app="$RUNNER_TEMP/SetwrightContainment.app"
           service="$app/Contents/XPCServices/SetwrightCompilerXPC.xpc"
-          runtime_root="$app/Contents/Resources/tex-runtime"
-          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/tex-runtime" \
+          runtime_root="$service/Contents/Resources/tex-runtime"
+          mkdir -p "$app/Contents/MacOS" \
             "$service/Contents/MacOS" "$service/Contents/Resources"
           cp src-tauri/native/macos/ContainmentHost-Info.plist "$app/Contents/Info.plist"
           cp "$test_binary" "$app/Contents/MacOS/SetwrightContainment"
@@ -192,7 +192,7 @@ jobs:
             src-tauri/target/debug/sandbox-hostile-fixture
 
           SETWRIGHT_PREPARE_FIXTURE_RUNTIME=1 \
-          SETWRIGHT_XPC_RUNTIME_ROOT="$app/Contents/Resources/tex-runtime" \
+          SETWRIGHT_XPC_RUNTIME_ROOT="$runtime_root" \
           SETWRIGHT_HOSTILE_FIXTURE_PATH="$PWD/src-tauri/target/debug/sandbox-hostile-fixture" \
             "$test_binary" native_hostile_fixture_containment_remains_incomplete_attestation --nocapture
           codesign --force --sign - --identifier org.setwright.desktop.compiler-xpc \

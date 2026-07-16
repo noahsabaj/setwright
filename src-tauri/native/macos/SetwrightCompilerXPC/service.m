@@ -233,9 +233,8 @@ static void handle_launch(xpc_object_t request) {
   NSString *output = [NSString stringWithUTF8String:outputText];
   NSURL *groupURL = [[NSFileManager defaultManager]
       containerURLForSecurityApplicationGroupIdentifier:@SETWRIGHT_APP_GROUP];
-  NSString *appRoot = NSBundle.mainBundle.bundlePath.stringByDeletingLastPathComponent
-      .stringByDeletingLastPathComponent.stringByDeletingLastPathComponent;
-  NSString *allowedRuntime = [appRoot stringByAppendingPathComponent:@"Contents/Resources/tex-runtime"];
+  NSString *allowedRuntime = [NSBundle.mainBundle.bundlePath
+      stringByAppendingPathComponent:@"Contents/Resources/tex-runtime"];
   NSString *latexmk = [runtime stringByAppendingPathComponent:@"bin/latexmk"];
   NSString *launcher = [NSBundle.mainBundle pathForResource:@"setwright-tex-launcher"
                                                       ofType:nil];

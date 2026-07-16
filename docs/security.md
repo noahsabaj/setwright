@@ -50,7 +50,8 @@ job tree on cancel or revision replacement.
 - **Windows:** a restrictive AppContainer identity, ACL-limited stage/runtime,
   and kill-on-close Job Object.
 - **macOS:** a separately signed XPC compiler service inside App Sandbox, with
-  no network entitlement and only app-group staging access.
+  no network entitlement, only app-group staging access, and the immutable
+  runtime sealed into the service bundle's read-only resources.
 - **Linux:** bundled bubblewrap with user, mount, PID, IPC, and network
   namespaces; dropped capabilities; `no_new_privs`; seccomp; and resource
   limits. If user namespaces are unavailable, compilation is disabled.
