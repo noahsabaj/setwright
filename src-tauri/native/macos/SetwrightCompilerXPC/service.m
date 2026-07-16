@@ -35,7 +35,10 @@ extern char **environ;
 @property(nonatomic) uint64_t writableLimit;
 @property(nonatomic) uint32_t processLimit;
 @property(nonatomic, copy) NSString *outputRoot;
-@property(nonatomic) BOOL completed;
+@property(atomic) BOOL completed;
+@property(atomic) BOOL watchdogStarted;
+@property(atomic, copy) NSString *terminationDetail;
+@property(nonatomic) int diagnosticFd;
 @property(nonatomic) int exitCode;
 @end
 @implementation SWJob
@@ -76,21 +79,35 @@ static OSStatus verify_code(NSString *path, NSString *requirementText) {
   return status;
 }
 
-static NSArray<NSNumber *> *process_tree(pid_t root) {
+static NSArray<NSNumber *> *process_tree(pid_t root, BOOL *valid) {
   NSMutableArray<NSNumber *> *result = [NSMutableArray array];
   NSMutableArray<NSNumber *> *pending = [NSMutableArray arrayWithObject:@(root)];
+  *valid = YES;
   while (pending.count > 0) {
     NSNumber *next = pending.lastObject;
     [pending removeLastObject];
     if ([result containsObject:next]) continue;
     [result addObject:next];
     int count = proc_listchildpids(next.intValue, NULL, 0);
-    if (count <= 0) continue;
+    if (count < 0) {
+      *valid = NO;
+      return @[];
+    }
+    if (count == 0) continue;
     pid_t *children = calloc((size_t)count, sizeof(pid_t));
-    int bytes = proc_listchildpids(next.intValue, children,
-                                   count * (int)sizeof(pid_t));
-    if (bytes > 0) {
-      int childCount = bytes / (int)sizeof(pid_t);
+    if (children == NULL) {
+      *valid = NO;
+      return @[];
+    }
+    // Unlike proc_listpids, proc_listchildpids returns a PID count.
+    int childCount = proc_listchildpids(next.intValue, children,
+                                        count * (int)sizeof(pid_t));
+    if (childCount < 0) {
+      free(children);
+      *valid = NO;
+      return @[];
+    }
+    if (childCount > 0) {
       for (int index = 0; index < childCount; index++)
         [pending addObject:@(children[index])];
     }
@@ -123,11 +140,14 @@ static uint64_t directory_bytes(NSString *root, BOOL *valid) {
   NSDirectoryEnumerator *enumerator = [[NSFileManager defaultManager]
       enumeratorAtURL:[NSURL fileURLWithPath:root]
       includingPropertiesForKeys:@[NSURLIsRegularFileKey, NSURLFileSizeKey]
-      options:NSDirectoryEnumerationSkipsPackageDescendants |
-              NSDirectoryEnumerationSkipsHiddenFiles
+      options:0
       errorHandler:^BOOL(NSURL *url, NSError *error) {
         (void)url; (void)error; *valid = NO; return NO;
       }];
+  if (enumerator == nil) {
+    *valid = NO;
+    return 0;
+  }
   for (NSURL *url in enumerator) {
     NSNumber *regular = nil;
     NSNumber *size = nil;
@@ -144,18 +164,50 @@ static uint64_t directory_bytes(NSString *root, BOOL *valid) {
   return total;
 }
 
+static int terminate_job(SWJob *job, NSString *detail) {
+  @synchronized(job) {
+    if (job.completed) return 0;
+    if (kill(-job.pid, SIGKILL) != 0) return errno == ESRCH ? 0 : errno;
+    job.terminationDetail = detail;
+    return 0;
+  }
+}
+
 static void start_watchdog(NSString *jobId, SWJob *job) {
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+    unsigned invalidSamples = 0;
     while (!job.completed) {
-      NSArray<NSNumber *> *processes = process_tree(job.pid);
+      BOOL treeValid = NO;
       BOOL memoryValid = NO;
       BOOL outputValid = NO;
+      NSArray<NSNumber *> *processes = process_tree(job.pid, &treeValid);
       uint64_t memory = resident_bytes(processes, &memoryValid);
       uint64_t output = directory_bytes(job.outputRoot, &outputValid);
-      if (!memoryValid || !outputValid || processes.count > job.processLimit ||
-          memory > job.memoryLimit || output > job.writableLimit) {
-        kill(-job.pid, SIGKILL);
-        break;
+      NSString *violation = nil;
+      if (treeValid && memoryValid && outputValid) {
+        invalidSamples = 0;
+        if (processes.count > job.processLimit) {
+          violation = [NSString stringWithFormat:
+              @"process count %lu exceeded limit %u",
+              (unsigned long)processes.count, job.processLimit];
+        } else if (memory > job.memoryLimit) {
+          violation = [NSString stringWithFormat:
+              @"resident memory %llu exceeded limit %llu", memory,
+              job.memoryLimit];
+        } else if (output > job.writableLimit) {
+          violation = [NSString stringWithFormat:
+              @"writable output %llu exceeded limit %llu", output,
+              job.writableLimit];
+        }
+      } else if (++invalidSamples >= 3) {
+        violation = [NSString stringWithFormat:
+            @"resource inspection failed (tree=%d memory=%d output=%d)",
+            treeValid, memoryValid, outputValid];
+      }
+      if (violation != nil) {
+        int terminationError = terminate_job(
+            job, [@"Setwright XPC watchdog: " stringByAppendingString:violation]);
+        if (terminationError == 0) break;
       }
       usleep(10000);
     }
@@ -311,9 +363,10 @@ static void handle_launch(xpc_object_t request) {
   int spawned = posix_spawn(&pid, launcher.UTF8String, &actions, &attributes, argv, envp);
   posix_spawnattr_destroy(&attributes);
   posix_spawn_file_actions_destroy(&actions);
-  close(stdoutPipe[1]); close(stderrPipe[1]);
+  close(stdoutPipe[1]);
   free_strings(argv); free_strings(envp);
   if (spawned != 0) {
+    close(stderrPipe[1]);
     close(stdoutPipe[0]); close(stderrPipe[0]);
     reply_error(request, "cannot start signed inheriting TeX helper");
     return;
@@ -325,8 +378,8 @@ static void handle_launch(xpc_object_t request) {
   job.writableLimit = writable;
   job.processLimit = (uint32_t)MIN(processLimit, UINT32_MAX);
   job.outputRoot = output;
+  job.diagnosticFd = stderrPipe[1];
   dispatch_sync(jobsQueue, ^{ jobs[jobId] = job; });
-  start_watchdog(jobId, job);
   xpc_object_t reply = xpc_dictionary_create_reply(request);
   xpc_dictionary_set_string(reply, "jobId", jobId.UTF8String);
   xpc_dictionary_set_fd(reply, "stdout", stdoutPipe[0]);
@@ -350,9 +403,20 @@ static void handle_control(xpc_object_t request, NSString *operation) {
   SWJob *job = lookup_job(request, &jobId);
   if (job == nil) { reply_error(request, "unknown XPC compile job"); return; }
   if ([operation isEqualToString:@"resume"]) {
-    if (kill(job.pid, SIGCONT) != 0) { reply_error(request, "cannot resume XPC job"); return; }
+    @synchronized(job) {
+      if (job.watchdogStarted) {
+        reply_error(request, "XPC compiler process was already resumed");
+        return;
+      }
+      if (kill(job.pid, SIGCONT) != 0) {
+        reply_error(request, "cannot resume XPC job");
+        return;
+      }
+      job.watchdogStarted = YES;
+    }
+    start_watchdog(jobId, job);
   } else if ([operation isEqualToString:@"terminate"]) {
-    if (kill(-job.pid, SIGKILL) != 0 && errno != ESRCH) {
+    if (terminate_job(job, @"Setwright XPC broker terminated the process group") != 0) {
       reply_error(request, "cannot terminate XPC process group"); return;
     }
   }
@@ -368,17 +432,36 @@ static void handle_wait(xpc_object_t request) {
   xpc_retain(request);
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
     int status = 0;
-    if (waitpid(job.pid, &status, 0) < 0) {
+    pid_t waited = 0;
+    do {
+      waited = waitpid(job.pid, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    if (waited < 0) {
+      terminate_job(job, @"Setwright XPC waiter could not reap the process group");
+      job.completed = YES;
+      close(job.diagnosticFd);
+      job.diagnosticFd = -1;
       reply_error(request, "cannot wait for XPC compiler process");
     } else {
-      job.completed = YES;
+      NSString *terminationDetail = nil;
+      @synchronized(job) {
+        job.completed = YES;
+        terminationDetail = job.terminationDetail;
+      }
       job.exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+      if (WIFSIGNALED(status)) {
+        NSString *detail = terminationDetail ?: [NSString stringWithFormat:
+            @"Setwright XPC compiler terminated by signal %d", WTERMSIG(status)];
+        dprintf(job.diagnosticFd, "%s\n", detail.UTF8String);
+      }
+      close(job.diagnosticFd);
+      job.diagnosticFd = -1;
       xpc_object_t reply = xpc_dictionary_create_reply(request);
       xpc_dictionary_set_int64(reply, "exitCode", job.exitCode);
       xpc_connection_send_message(xpc_dictionary_get_remote_connection(request), reply);
       xpc_release(reply);
-      dispatch_sync(jobsQueue, ^{ [jobs removeObjectForKey:jobId]; });
     }
+    dispatch_sync(jobsQueue, ^{ [jobs removeObjectForKey:jobId]; });
     xpc_release(request);
   });
 }

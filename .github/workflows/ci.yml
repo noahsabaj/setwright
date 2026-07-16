@@ -249,10 +249,13 @@ jobs:
           codesign --force --keychain "$keychain" --sign "$identity" \
             --identifier org.setwright.desktop "$app"
           codesign --verify --deep --strict --verbose=2 "$app"
+          codesign --display --verbose=4 "$service"
           codesign --display --entitlements - "$service"
           codesign --verify --strict --verbose=2 "$service/Contents/Resources/setwright-tex-launcher"
+          codesign --display --verbose=4 "$service/Contents/Resources/setwright-tex-launcher"
           codesign --display --entitlements - --requirements - "$service/Contents/Resources/setwright-tex-launcher"
           codesign --verify --strict --verbose=2 "$runtime_root/texlive-2025.2025-08-03-macos-aarch64/bin/latexmk"
+          codesign --display --verbose=4 "$runtime_root/texlive-2025.2025-08-03-macos-aarch64/bin/latexmk"
           codesign --display --entitlements - --requirements - "$runtime_root/texlive-2025.2025-08-03-macos-aarch64/bin/latexmk"
 
           group_root="$HOME/Library/Group Containers/group.org.setwright.desktop"
@@ -299,6 +302,13 @@ jobs:
           export SETWRIGHT_PROBE_EVIDENCE="$RUNNER_TEMP/sandbox-probe-macos.json"
           "$SETWRIGHT_CONTAINMENT_APP/Contents/MacOS/SetwrightContainment" \
             native_hostile_fixture_containment_remains_incomplete_attestation --nocapture
+      - name: Diagnose macOS sandbox failure
+        if: failure() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          /usr/bin/log show --last 5m --style compact \
+            --predicate 'process == "SetwrightCompilerXPC" OR process == "setwright-tex-launcher" OR process == "sandbox-hostile-fixture" OR eventMessage CONTAINS[c] "SetwrightContainment"' \
+            || true
       - name: Upload containment-only probe evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
