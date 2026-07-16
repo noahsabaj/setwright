@@ -54,12 +54,14 @@ if (cargo.status !== 0) {
 }
 assertBytesExclude("normal Cargo dependency graph", Buffer.from(cargo.stdout));
 
-const binary = process.env.SETWRIGHT_PRODUCTION_BINARY;
-if (binary !== undefined && binary.length > 0) {
-  const binaryPath = resolve(binary);
+if (process.argv.includes("--require-binary")) {
+  const binaryPath = resolve(
+    "src-tauri",
+    "target",
+    "release",
+    process.platform === "win32" ? "setwright-desktop.exe" : "setwright-desktop",
+  );
   assertBytesExclude(binaryPath, readFileSync(binaryPath));
-} else if (process.argv.includes("--require-binary")) {
-  throw new Error("SETWRIGHT_PRODUCTION_BINARY is required for the release-binary negative check.");
 }
 
 process.stdout.write("Production PDF boundary contains no E2E plugin, capability, port, or harness markers.\n");

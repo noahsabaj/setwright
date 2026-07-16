@@ -459,9 +459,6 @@ jobs:
           cat test-results/pdf-preview/chrome-125/server.log
           exit 1
       - name: Exercise PDF.js at the supported Chromium floor
-        env:
-          SETWRIGHT_PDF_EVIDENCE: test-results/pdf-preview/chrome-125/evidence.json
-          SETWRIGHT_PDF_RESULTS: test-results/pdf-preview/chrome-125
         run: pnpm test:pdf-browser
       - name: Stop fixture server
         if: always()
@@ -475,7 +472,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: pdf-preview-chromium-${{ steps.chrome.outputs.version }}
-          path: test-results/pdf-preview/chrome-125
+          path: test-results/pdf-preview
           if-no-files-found: error
           retention-days: 14
 
@@ -493,8 +490,6 @@ jobs:
     timeout-minutes: 30
     env:
       MACOSX_DEPLOYMENT_TARGET: '15.0'
-      SETWRIGHT_PDF_EVIDENCE: test-results/pdf-preview/native/evidence.json
-      SETWRIGHT_PDF_RESULTS: test-results/pdf-preview/native
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -552,18 +547,13 @@ jobs:
         run: |
           pnpm build
           cargo build --locked --release --manifest-path src-tauri/Cargo.toml --no-default-features --features custom-protocol --bin setwright-desktop
-          if [[ "$RUNNER_OS" == 'Windows' ]]; then
-            export SETWRIGHT_PRODUCTION_BINARY='src-tauri/target/release/setwright-desktop.exe'
-          else
-            export SETWRIGHT_PRODUCTION_BINARY='src-tauri/target/release/setwright-desktop'
-          fi
           node tools/pdf-preview/check-production-boundary.mjs --require-binary
       - name: Upload native PDF evidence and failure screenshots
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: pdf-preview-${{ matrix.os }}
-          path: test-results/pdf-preview/native
+          path: test-results/pdf-preview
           if-no-files-found: warn
           retention-days: 14
 

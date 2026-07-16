@@ -21,7 +21,7 @@ fn main() {
         cc::Build::new()
             .file(bridge)
             .flag("-fblocks")
-            .flag(&format!("-mmacosx-version-min={MACOS_DEPLOYMENT_TARGET}"))
+            .flag(format!("-mmacosx-version-min={MACOS_DEPLOYMENT_TARGET}"))
             .compile("setwright_xpc_bridge");
         println!("cargo:rerun-if-changed={}", bridge.display());
         println!("cargo:rustc-link-arg=-mmacosx-version-min={MACOS_DEPLOYMENT_TARGET}");

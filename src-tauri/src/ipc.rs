@@ -1142,6 +1142,7 @@ pub fn get_webview_runtime_info() -> WebviewRuntimeInfo {
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn compare_dotted_versions(left: &str, right: &str) -> Option<std::cmp::Ordering> {
     let parse = |value: &str| {
         value

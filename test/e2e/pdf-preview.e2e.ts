@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { $, browser, expect } from "@wdio/globals";
+import { resultRoot } from "./wdio.shared";
 
 interface CanvasMetrics {
   width: number;
@@ -117,6 +118,10 @@ describe("durable PDF preview boundary", () => {
       "01fe33bf01f3e80ed62ce7e4f281277dfaf6b6d91e3e300b9337d29029faddbb",
     );
     await expect($(".preview-toolbar__pages input")).toHaveAttribute("max", "2");
+    await browser.waitUntil(async () => (await canvasMetrics()).nonWhiteRatio > 0.005, {
+      timeout: 30_000,
+      timeoutMsg: "The representative PDF canvas never painted non-white content.",
+    });
     const metrics = await canvasMetrics();
     expect(metrics.width).toBeGreaterThan(500);
     expect(metrics.height).toBeGreaterThan(700);
@@ -166,7 +171,7 @@ describe("durable PDF preview boundary", () => {
     await browser.waitUntil(async () => (await runtimeOutput.getAttribute("data-value")) !== "detecting", { timeout: 30_000 });
     const runtime = await runtimeOutput.getAttribute("data-value");
     if (runtime === null || runtime === "detecting") throw new Error("Webview runtime evidence was not populated.");
-    const evidencePath = resolve(process.env.SETWRIGHT_PDF_EVIDENCE ?? "test-results/pdf-preview/evidence.json");
+    const evidencePath = resolve(resultRoot, "evidence.json");
     const evidence = {
       schemaVersion: 1,
       platform: process.platform,
