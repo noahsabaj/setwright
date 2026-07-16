@@ -32,10 +32,20 @@ int main(int argc, char **argv, char **environment) {
     fputs("invalid Setwright resource limit\n", stderr);
     return 64;
   }
-  if (apply_limit(RLIMIT_AS, memory) != 0 ||
-      apply_limit(RLIMIT_FSIZE, writable) != 0 ||
-      apply_limit(RLIMIT_CORE, 0) != 0) {
-    perror("setrlimit");
+  // Darwin applies RLIMIT_AS to the launcher's existing VM map and rejects a
+  // lower limit with EINVAL. The XPC watchdog enforces aggregate resident
+  // memory for the complete process tree instead.
+  (void)memory;
+  int limit_error = apply_limit(RLIMIT_FSIZE, writable);
+  if (limit_error != 0) {
+    errno = limit_error;
+    perror("setrlimit RLIMIT_FSIZE");
+    return 70;
+  }
+  limit_error = apply_limit(RLIMIT_CORE, 0);
+  if (limit_error != 0) {
+    errno = limit_error;
+    perror("setrlimit RLIMIT_CORE");
     return 70;
   }
   execve(argv[4], &argv[4], environment);
