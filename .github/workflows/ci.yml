@@ -266,11 +266,11 @@ jobs:
             --entitlements "$service_entitlements" "$service"
           codesign --force --keychain "$keychain" --sign "$identity" \
             --identifier org.setwright.desktop "$app"
-          codesign --verify --strict --test-requirement="$host_requirement" "$app"
-          codesign --verify --strict --test-requirement="$service_requirement" "$service"
-          codesign --verify --strict --test-requirement="$helper_requirement" \
+          codesign --verify --strict -R="$host_requirement" "$app"
+          codesign --verify --strict -R="$service_requirement" "$service"
+          codesign --verify --strict -R="$helper_requirement" \
             "$service/Contents/Resources/setwright-tex-launcher"
-          codesign --verify --strict --test-requirement="$helper_requirement" \
+          codesign --verify --strict -R="$helper_requirement" \
             "$runtime_root/texlive-2025.2025-08-03-macos-aarch64/bin/latexmk"
           codesign --verify --deep --strict --verbose=2 "$app"
           codesign --display --verbose=4 "$service"
