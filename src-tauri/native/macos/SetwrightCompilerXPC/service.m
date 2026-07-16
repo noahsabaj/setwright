@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <libproc.h>
 #include <mach/message.h>
+#include <os/log.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdbool.h>
@@ -53,6 +54,13 @@ static void reply_error(xpc_object_t request, const char *message) {
   xpc_dictionary_set_string(reply, "error", message ?: "XPC service error");
   xpc_connection_t peer = xpc_dictionary_get_remote_connection(request);
   xpc_connection_send_message(peer, reply);
+  xpc_release(reply);
+}
+
+static void reply_ok(xpc_object_t request) {
+  xpc_object_t reply = xpc_dictionary_create_reply(request);
+  if (reply == NULL) return;
+  xpc_connection_send_message(xpc_dictionary_get_remote_connection(request), reply);
   xpc_release(reply);
 }
 
@@ -166,8 +174,8 @@ static uint64_t directory_bytes(NSString *root, BOOL *valid) {
 
 static int terminate_job(SWJob *job, NSString *detail) {
   @synchronized(job) {
-    if (job.completed) return 0;
-    if (kill(-job.pid, SIGKILL) != 0) return errno == ESRCH ? 0 : errno;
+    if (job.completed) return ESRCH;
+    if (kill(-job.pid, SIGKILL) != 0) return errno;
     job.terminationDetail = detail;
     return 0;
   }
@@ -207,7 +215,12 @@ static void start_watchdog(NSString *jobId, SWJob *job) {
       if (violation != nil) {
         int terminationError = terminate_job(
             job, [@"Setwright XPC watchdog: " stringByAppendingString:violation]);
-        if (terminationError == 0) break;
+        if (terminationError == 0) {
+          os_log_error(OS_LOG_DEFAULT, "Setwright XPC watchdog terminated job: %{public}s",
+                       violation.UTF8String);
+          break;
+        }
+        if (terminationError == ESRCH) break;
       }
       usleep(10000);
     }
@@ -401,7 +414,13 @@ static SWJob *lookup_job(xpc_object_t request, NSString **jobId) {
 static void handle_control(xpc_object_t request, NSString *operation) {
   NSString *jobId = nil;
   SWJob *job = lookup_job(request, &jobId);
-  if (job == nil) { reply_error(request, "unknown XPC compile job"); return; }
+  if (job == nil) {
+    // Tree termination is deliberately idempotent. The waiter may reap and
+    // retire a job between a caller observing its marker and sending cancel.
+    if ([operation isEqualToString:@"terminate"]) reply_ok(request);
+    else reply_error(request, "unknown XPC compile job");
+    return;
+  }
   if ([operation isEqualToString:@"resume"]) {
     @synchronized(job) {
       if (job.watchdogStarted) {
@@ -416,13 +435,13 @@ static void handle_control(xpc_object_t request, NSString *operation) {
     }
     start_watchdog(jobId, job);
   } else if ([operation isEqualToString:@"terminate"]) {
-    if (terminate_job(job, @"Setwright XPC broker terminated the process group") != 0) {
+    int terminationError = terminate_job(
+        job, @"Setwright XPC broker terminated the process group");
+    if (terminationError != 0 && terminationError != ESRCH) {
       reply_error(request, "cannot terminate XPC process group"); return;
     }
   }
-  xpc_object_t reply = xpc_dictionary_create_reply(request);
-  xpc_connection_send_message(xpc_dictionary_get_remote_connection(request), reply);
-  xpc_release(reply);
+  reply_ok(request);
 }
 
 static void handle_wait(xpc_object_t request) {

@@ -350,13 +350,15 @@ where
             .unwrap()
     });
     drop(control);
-    ProbeRun {
+    let run = ProbeRun {
         stage,
         status,
         stdout: stdout_thread.join().unwrap().unwrap(),
         stderr: stderr_thread.join().unwrap().unwrap(),
         trigger_observed,
-    }
+    };
+    println!("sandbox mode {mode}: {}", display_run(&run));
+    run
 }
 
 fn install_signed_fixture_runtime(
