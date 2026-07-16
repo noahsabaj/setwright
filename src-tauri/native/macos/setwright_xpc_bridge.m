@@ -98,8 +98,7 @@ void *sw_xpc_connect(const char *service_name, char *error_buffer,
     sw_error(error_buffer, error_length, @"XPC service name is null");
     return NULL;
   }
-  xpc_connection_t connection = xpc_connection_create_mach_service(
-      service_name, NULL, 0);
+  xpc_connection_t connection = xpc_connection_create(service_name, NULL);
   if (connection == NULL) {
     sw_error(error_buffer, error_length, @"cannot create XPC service connection");
     return NULL;
