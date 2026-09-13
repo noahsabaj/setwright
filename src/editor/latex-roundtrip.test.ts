@@ -19,6 +19,19 @@ function blockOfKind(document: JSONContent, kind: string, occurrence = 0): JSONC
 }
 
 describe("conservative LaTeX projection", () => {
+  it("reports current UTF-16 block ranges after Unicode edits and duplicate headings", () => {
+    const source = "α😀 before\n\n\\section{Same}\nFirst.\n\n\\section{Same}\nSecond.\n";
+    const projection = projectLatex(source, "chapter");
+    const document = cloneDocument(projection.document);
+    blockOfKind(document, "paragraph").content = [{ type: "text", text: "Longer α😀 introduction" }];
+    const result = reconstructLatex(projection, document);
+    const headings = result.ranges.filter((range) => document.content?.[range.nodeIndex]?.attrs?.sourceKind === "heading");
+    expect(headings).toHaveLength(2);
+    expect(headings[1]?.startOffset).toBe(result.source.lastIndexOf("\\section{Same}"));
+    expect(result.source.slice(headings[1]?.startOffset, headings[1]?.endOffset)).toContain("\\section{Same}");
+    expect(result.ranges.at(-1)?.endOffset).toBe(result.source.length);
+    expect(result.source).not.toContain("sourceOffset");
+  });
   it.each(["generic", "acm", "ieee"])("keeps the %s first-party template table visually editable", (template) => {
     const path = resolve(process.cwd(), "templates", template, "main.tex");
     const source = readFileSync(path, "utf8");
@@ -167,7 +180,7 @@ Ours & 4.8 & 1 \\
     const projection = projectLatex(source, "main.tex");
     const editor = new Editor({ extensions: editorExtensions, content: projection.document });
     try {
-      expect(reconstructLatex(projection, editor.getJSON())).toEqual({ source, changes: [] });
+      expect(reconstructLatex(projection, editor.getJSON())).toMatchObject({ source, changes: [] });
     } finally {
       editor.destroy();
     }
@@ -223,7 +236,7 @@ Ours & 4.8 & 1 \\
       expect(projection.ownership.map((owner) => owner.kind)).toEqual(expect.arrayContaining([
         "theorem", "definition", "proof", "quote", "list", "listing",
       ]));
-      expect(reconstructLatex(projection, editor.getJSON())).toEqual({ source, changes: [] });
+      expect(reconstructLatex(projection, editor.getJSON())).toMatchObject({ source, changes: [] });
     } finally {
       editor.destroy();
     }
@@ -329,7 +342,7 @@ fn value() -> i32 {
 
     expect(projection.ownership.map((owner) => owner.kind)).not.toContain("theorem");
     expect(projection.ownership.map((owner) => owner.kind)).not.toContain("list");
-    expect(reconstructLatex(projection, projection.document)).toEqual({ source, changes: [] });
+    expect(reconstructLatex(projection, projection.document)).toMatchObject({ source, changes: [] });
     expect(projection.ownership.filter((owner) => owner.kind === "raw").map((owner) => owner.original).join("")).toContain(unsupportedStatement);
     expect(projection.ownership.filter((owner) => owner.kind === "raw").map((owner) => owner.original).join("")).toContain(unsupportedList);
   });

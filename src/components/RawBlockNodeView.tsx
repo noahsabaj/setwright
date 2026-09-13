@@ -1,7 +1,7 @@
 import type { ChangeEvent } from "react";
 import type { NodeViewProps } from "@tiptap/react";
 import { NodeViewWrapper } from "@tiptap/react";
-import { Braces, LockKeyhole } from "lucide-react";
+import { Braces, ChevronRight } from "lucide-react";
 
 export function RawBlockNodeView({ node, selected, updateAttributes }: NodeViewProps) {
   const source = String(node.attrs.source);
@@ -12,13 +12,15 @@ export function RawBlockNodeView({ node, selected, updateAttributes }: NodeViewP
   };
 
   return (
-    <NodeViewWrapper className="raw-block" data-selected={selected} contentEditable={false}>
-      <header className="raw-block__header">
-        <span><Braces size={14} aria-hidden="true" /> Preserved source · {environment}</span>
-        <span title="Setwright will preserve this source exactly"><LockKeyhole size={12} aria-hidden="true" /> byte-safe</span>
-      </header>
-      <textarea value={source} onChange={handleChange} aria-label={`Raw ${environment} source`} spellCheck={false} />
-      <p>Unsupported visual content remains exact LaTeX. Editing here changes only this block.</p>
+    <NodeViewWrapper as="details" className="raw-block" data-selected={selected} contentEditable={false}>
+      <summary className="raw-block__header">
+        <span><Braces size={14} aria-hidden="true" /> {environment === "source" ? "Preserved LaTeX" : `Preserved source · ${environment}`}</span>
+        <span className="raw-block__disclosure">Edit source <ChevronRight size={13} aria-hidden="true" /></span>
+      </summary>
+      <div className="raw-block__body">
+        <textarea value={source} onChange={handleChange} aria-label={`Raw ${environment} source`} spellCheck={false} />
+        <p>This LaTeX is preserved as written. Edits here change only this block.</p>
+      </div>
     </NodeViewWrapper>
   );
 }

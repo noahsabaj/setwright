@@ -1,383 +1,267 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { Dialog, Modal, ModalOverlay } from "react-aria-components";
 import type { VisualSourceChange } from "../editor/latex-roundtrip";
-import type { PdfArtifact, ProjectSnapshot, RuntimeReadiness } from "../lib/contracts";
+import type { SourceNavigation } from "../editor/navigation";
+import type { PdfArtifact, ProjectFile, ProjectSnapshot, RuntimeReadiness } from "../lib/contracts";
 import { deriveProjectMetrics } from "../lib/project-metrics";
+import type { ProjectOutlineItem } from "../lib/project-metrics";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts";
+import { useCloseProtection } from "../hooks/useCloseProtection";
 import { desktopBridge } from "../lib/bridge";
+import { selectedProjectLocation } from "../lib/project-location";
 import { events } from "../lib/bindings";
-import { createDeclaredSourceEdits, createMinimalSourceEdit } from "../lib/source-edits";
+import { WorkspaceSession } from "../lib/workspace-session";
 import { useWorkspaceStore } from "../store/workspace-store";
 import { AppHeader } from "./AppHeader";
 import { CommandPalette } from "./CommandPalette";
 import { EncodingConversionPanel } from "./EncodingConversionPanel";
-import { PreviewPane } from "./PreviewPane";
 import { ProjectSidebar } from "./ProjectSidebar";
 import { ReviewRail } from "./ReviewRail";
 import { SplitWorkspace } from "./SplitWorkspace";
 import { StatusBar } from "./StatusBar";
 import { VisualEditor } from "./VisualEditor";
 
-const SourceEditor = lazy(async () => {
-  const module = await import("./SourceEditor");
-  return { default: module.SourceEditor };
-});
+const SourceEditor = lazy(async () => ({ default: (await import("./SourceEditor")).SourceEditor }));
+const compactQuery = "(max-width: 1099px)";
+const subscribeCompact = (listener: () => void) => {
+  const media = window.matchMedia(compactQuery);
+  media.addEventListener("change", listener);
+  return () => media.removeEventListener("change", listener);
+};
 
 interface WorkspaceShellProps {
   project: ProjectSnapshot;
   onProjectChange: (project: ProjectSnapshot) => void;
+  onProjectClosed?: () => void;
 }
 
-export function WorkspaceShell({ project, onProjectChange }: WorkspaceShellProps) {
-  const mainFile = project.files.find((file) => file.id === project.mainFile);
-  const projectMetrics = useMemo(() => deriveProjectMetrics(project), [project]);
-  const mode = useWorkspaceStore((state) => state.mode);
-  const theme = useWorkspaceStore((state) => state.theme);
-  const outlineOpen = useWorkspaceStore((state) => state.outlineOpen);
-  const reviewPanel = useWorkspaceStore((state) => state.reviewPanel);
-  const saveState = useWorkspaceStore((state) => state.saveState);
-  const setSaveState = useWorkspaceStore((state) => state.setSaveState);
-  const compileState = useWorkspaceStore((state) => state.compileState);
-  const setCompileState = useWorkspaceStore((state) => state.setCompileState);
-  const [editError, setEditError] = useState<string | null>(null);
+export function WorkspaceShell({ project: initialProject, onProjectChange, onProjectClosed }: WorkspaceShellProps) {
+  const [session] = useState(() => new WorkspaceSession(initialProject, desktopBridge));
+  const state = useSyncExternalStore(session.subscribe, session.getSnapshot);
+  const { project, drafts } = state;
+  const [selectedFileId, setSelectedFileId] = useState(project.mainFile);
+  const [visitedFiles, setVisitedFiles] = useState([project.mainFile]);
+  const [navigation, setNavigation] = useState<SourceNavigation>();
+  const nextNavigationId = useRef(0);
+  const mode = useWorkspaceStore((store) => store.mode);
+  const setMode = useWorkspaceStore((store) => store.setMode);
+  const theme = useWorkspaceStore((store) => store.theme);
+  const outlineOpen = useWorkspaceStore((store) => store.outlineOpen);
+  const setOutlineOpen = useWorkspaceStore((store) => store.setOutlineOpen);
+  const reviewPanel = useWorkspaceStore((store) => store.reviewPanel);
+  const setReviewPanel = useWorkspaceStore((store) => store.setReviewPanel);
+  const setSaveState = useWorkspaceStore((store) => store.setSaveState);
+  const compileState = useWorkspaceStore((store) => store.compileState);
+  const setCompileState = useWorkspaceStore((store) => store.setCompileState);
+  const lastEditingMode = useRef<"write" | "source" | "split">("write");
+  const [operationError, setOperationError] = useState<string | null>(null);
   const [runtimeReadiness, setRuntimeReadiness] = useState<RuntimeReadiness | null>(null);
   const [pdfArtifact, setPdfArtifact] = useState<PdfArtifact | null>(null);
-  const [sourceDraft, setSourceDraft] = useState(mainFile?.content ?? "");
-  const [draftActive, setDraftActive] = useState(false);
-  const projectRef = useRef(project);
-  const draftActiveRef = useRef(false);
-  const operationQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const draftSequenceRef = useRef(0);
-  const saveTimerRef = useRef<number | null>(null);
-  const mountedRef = useRef(true);
-  useKeyboardShortcuts();
+  const compact = useSyncExternalStore(subscribeCompact, () => window.matchMedia(compactQuery).matches);
+  const activeFile = project.files.find((file) => file.id === selectedFileId)
+    ?? project.files.find((file) => file.id === project.mainFile);
+  const canWrite = activeFile?.kind === "tex" && activeFile.content !== null && activeFile.encoding === "utf8";
+  const effectiveMode = mode === "write" && !canWrite ? "source" : mode;
+  useKeyboardShortcuts({ canWrite });
 
+  useEffect(() => { onProjectChange(project); }, [onProjectChange, project]);
+  useEffect(() => { setSaveState(session.saveState); }, [session, state, setSaveState]);
+  useEffect(() => () => session.stopAutosave(), [session]);
   useEffect(() => {
-    projectRef.current = project;
-  }, [project]);
+    if (mode !== "preview") lastEditingMode.current = mode;
+    if (mode === "write" && !canWrite) setMode("source");
+  }, [canWrite, mode, setMode]);
+  useEffect(() => { if (compact) setOutlineOpen(false); }, [compact, setOutlineOpen]);
 
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-      if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current);
-    };
+  const reportOperationError = useCallback((cause: unknown) => {
+    setOperationError(cause instanceof Error ? cause.message : "The operation could not be completed.");
   }, []);
-
-  useEffect(() => {
-    const protectWorkingDraft = (event: BeforeUnloadEvent) => {
-      if (!draftActive && !project.dirty) return;
-      event.preventDefault();
-      event.returnValue = "";
-    };
-    window.addEventListener("beforeunload", protectWorkingDraft);
-    return () => window.removeEventListener("beforeunload", protectWorkingDraft);
-  }, [draftActive, project.dirty]);
-
-  const reportFailure = useCallback((cause: unknown) => {
-    if (!mountedRef.current) return;
-    setSaveState("conflict");
-    setEditError(cause instanceof Error ? cause.message : "The source change could not be applied safely.");
-  }, [setSaveState]);
-
-  const reportNonSaveFailure = useCallback((cause: unknown) => {
-    if (!mountedRef.current) return;
-    setEditError(cause instanceof Error ? cause.message : "The operation could not be completed.");
-  }, []);
-
-  useEffect(() => {
-    if (desktopBridge.runtime !== "tauri") return undefined;
-    let disposed = false;
-    let stopListening: (() => void) | undefined;
-    void import("@tauri-apps/api/event")
-      .then(({ listen }) => listen<string>("setwright-close-blocked", (event) => {
-        setEditError(event.payload);
-      }))
-      .then((unlisten) => {
-        if (disposed) unlisten();
-        else stopListening = unlisten;
-      })
-      .catch(reportFailure);
-    return () => {
-      disposed = true;
-      stopListening?.();
-    };
-  }, [reportFailure]);
+  useCloseProtection(session, reportOperationError);
 
   useEffect(() => {
     let cancelled = false;
     void desktopBridge.getRuntimeReadiness().then((readiness) => {
       if (!cancelled) setRuntimeReadiness(readiness);
-    }).catch((cause: unknown) => {
-      if (!cancelled) reportNonSaveFailure(cause);
-    });
+    }).catch((cause: unknown) => { if (!cancelled) reportOperationError(cause); });
     void desktopBridge.readCompilePdf(project.sessionId).then((artifact) => {
-      if (!cancelled) {
-        setPdfArtifact(artifact);
-        setCompileState("success");
-      }
-    }).catch(() => {
-      if (!cancelled) setPdfArtifact(null);
-    });
+      if (!cancelled) { setPdfArtifact(artifact); setCompileState("success"); }
+    }).catch(() => { if (!cancelled) setPdfArtifact(null); });
     return () => { cancelled = true; };
-  }, [project.sessionId, reportNonSaveFailure, setCompileState]);
+  }, [project.sessionId, reportOperationError, setCompileState]);
 
   useEffect(() => {
-    if (desktopBridge.runtime !== "tauri") return undefined;
+    if (desktopBridge.runtime !== "tauri") return;
     let disposed = false;
-    let stopListening: (() => void) | undefined;
-    void events.setwrightCompileEvent.listen((message) => {
-      const envelope = message.payload;
-      if (envelope.sessionId !== projectRef.current.sessionId) return;
+    const stops: (() => void)[] = [];
+    const remember = (stop: () => void) => { if (disposed) stop(); else stops.push(stop); };
+    void import("@tauri-apps/api/event").then(({ listen }) => listen<string>("setwright-close-blocked", (event) => {
+      if (!disposed) setOperationError(event.payload);
+    })).then(remember).catch(reportOperationError);
+    void events.setwrightCompileEvent.listen(({ payload: envelope }) => {
+      if (disposed || envelope.sessionId !== project.sessionId) return;
       const event = envelope.event;
-      if (event.kind === "queued" || event.kind === "started") {
-        setCompileState("compiling");
-      } else if (event.kind === "finished") {
+      if (event.kind === "queued" || event.kind === "started") setCompileState("compiling");
+      else if (event.kind === "finished") {
         if (!event.success) {
           setCompileState("failed");
           setPdfArtifact((current) => current === null ? null : { ...current, stale: true });
-          return;
+        } else {
+          void desktopBridge.readCompilePdf(envelope.sessionId).then((artifact) => {
+            if (!disposed) { setPdfArtifact(artifact); setCompileState("success"); }
+          }).catch(reportOperationError);
         }
-        void desktopBridge.readCompilePdf(envelope.sessionId).then((artifact) => {
-          if (!disposed) {
-            setPdfArtifact(artifact);
-            setCompileState("success");
-          }
-        }).catch(reportNonSaveFailure);
-      } else if (event.kind === "cancelled") {
-        setCompileState("idle");
-      }
-    }).then((unlisten) => {
-      if (disposed) unlisten();
-      else stopListening = unlisten;
-    }).catch(reportNonSaveFailure);
-    return () => {
-      disposed = true;
-      stopListening?.();
-    };
-  }, [reportNonSaveFailure, setCompileState]);
+      } else if (event.kind === "cancelled") setCompileState("idle");
+    }).then(remember).catch(reportOperationError);
+    return () => { disposed = true; stops.forEach((stop) => stop()); };
+  }, [project.sessionId, reportOperationError, setCompileState]);
 
-  const scheduleSave = useCallback((savingSequence: number) => {
-    if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = window.setTimeout(() => {
-      saveTimerRef.current = null;
-      operationQueueRef.current = operationQueueRef.current.then(async () => {
-        const current = projectRef.current;
-        setSaveState("saving");
-        await desktopBridge.saveProject(current.sessionId, current.revision);
-        if (!mountedRef.current) return;
-        const saved: ProjectSnapshot = {
-          ...current,
-          files: current.files.map((file) => ({ ...file, dirty: false })),
-          dirty: false,
-        };
-        projectRef.current = saved;
-        onProjectChange(saved);
-        if (draftSequenceRef.current === savingSequence) {
-          draftActiveRef.current = false;
-          setDraftActive(false);
-        }
-        setSaveState("saved");
-      }).catch(reportFailure);
-    }, 750);
-  }, [onProjectChange, reportFailure, setSaveState]);
+  const displayedProject = useMemo(() => ({
+    ...project,
+    files: project.files.map((file) => drafts[file.id] === undefined ? file : { ...file, content: drafts[file.id]!.text, dirty: true }),
+  }), [project, drafts]);
+  const metrics = useMemo(() => deriveProjectMetrics(displayedProject), [displayedProject]);
 
-  const handleSourceChange = useCallback((nextSource: string, declaredChanges?: readonly VisualSourceChange[], basisSource?: string) => {
-    const operationSequence = draftSequenceRef.current + 1;
-    draftSequenceRef.current = operationSequence;
-    setSourceDraft(nextSource);
-    draftActiveRef.current = true;
-    setDraftActive(true);
-    setEditError(null);
-    setSaveState("dirty");
-    if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current);
-    operationQueueRef.current = operationQueueRef.current.then(async () => {
-      const current = projectRef.current;
-      const mainFile = current.files.find((file) => file.id === current.mainFile);
-      if (mainFile === undefined || mainFile.content === null) {
-        throw new Error("This file is source-only until its encoding is explicitly converted to UTF-8.");
-      }
-      const declaredEdits = declaredChanges !== undefined && basisSource === mainFile.content
-        ? await createDeclaredSourceEdits(mainFile.id, mainFile.content, nextSource, declaredChanges)
-        : null;
-      const fallbackEdit = declaredEdits === null
-        ? await createMinimalSourceEdit(mainFile.id, mainFile.content, nextSource)
-        : null;
-      const edits = declaredEdits ?? (fallbackEdit === null ? [] : [fallbackEdit]);
-      if (edits.length === 0) {
-        if (draftSequenceRef.current === operationSequence && mountedRef.current) {
-          draftActiveRef.current = false;
-          setDraftActive(false);
-          setSaveState(current.dirty ? "dirty" : "saved");
-        }
-        return;
-      }
-      const result = await desktopBridge.applySourceEdits(current.sessionId, current.revision, edits);
-      if (!mountedRef.current) return;
-      const updated: ProjectSnapshot = {
-        ...current,
-        revision: result.revision,
-        files: result.files,
-        dirty: true,
-      };
-      projectRef.current = updated;
-      onProjectChange(updated);
-      setSaveState("dirty");
-      scheduleSave(operationSequence);
-    }).catch((cause: unknown) => {
-      if (draftSequenceRef.current === operationSequence && mountedRef.current) {
-        const current = projectRef.current;
-        const canonicalMain = current.files.find((file) => file.id === current.mainFile);
-        setSourceDraft(canonicalMain?.content ?? "");
-        draftActiveRef.current = false;
-        setDraftActive(false);
-      }
-      reportFailure(cause);
-    });
-  }, [onProjectChange, reportFailure, scheduleSave, setSaveState]);
+  const selectFile = useCallback((fileId: string) => {
+    const file = session.getSnapshot().project.files.find((candidate) => candidate.id === fileId);
+    if (file === undefined) return;
+    setSelectedFileId(fileId);
+    setVisitedFiles((files) => files.includes(fileId) ? files : [...files, fileId]);
+    setNavigation(undefined);
+    const editingMode = mode === "preview" ? lastEditingMode.current : mode;
+    setMode(editingMode === "write" && (file.kind !== "tex" || file.content === null || file.encoding !== "utf8") ? "source" : editingMode);
+    if (compact) setOutlineOpen(false);
+  }, [compact, mode, session, setMode, setOutlineOpen]);
 
-  const handleRestoreSnapshot = useCallback(async (snapshotId: string) => {
-    if (draftActiveRef.current || projectRef.current.dirty || saveState !== "saved") {
-      throw new Error("Save or discard the current changes before restoring a version.");
-    }
-    if (saveTimerRef.current !== null) {
-      window.clearTimeout(saveTimerRef.current);
-      saveTimerRef.current = null;
-    }
-    const task = operationQueueRef.current.then(async () => {
-      const current = projectRef.current;
-      if (draftActiveRef.current || current.dirty) {
-        throw new Error("The paper changed before the restore could start. Save it first.");
+  const navigate = useCallback((item: ProjectOutlineItem) => {
+    selectFile(item.fileId);
+    setNavigation({ fileId: item.fileId, sourceOffset: item.sourceOffset, requestId: ++nextNavigationId.current });
+  }, [selectFile]);
+
+  const fallbackToSource = useCallback((request: SourceNavigation) => {
+    setMode("source");
+    setNavigation(request);
+  }, [setMode]);
+
+  const openAnother = useCallback(() => {
+    void desktopBridge.pickProjectPath().then(async (path) => {
+      if (path !== null) {
+        const { rootPath, mainFile } = selectedProjectLocation(path);
+        await desktopBridge.openProjectWindow(rootPath, mainFile);
       }
-      const restored = await desktopBridge.restoreSnapshot(current.sessionId, snapshotId);
-      const restoredMain = restored.files.find((file) => file.id === restored.mainFile);
-      draftSequenceRef.current += 1;
-      draftActiveRef.current = false;
-      setDraftActive(false);
-      setSourceDraft(restoredMain?.content ?? "");
-      setEditError(null);
-      setSaveState("saved");
-      projectRef.current = restored;
-      onProjectChange(restored);
-      return restored;
-    });
-    operationQueueRef.current = task.then(() => undefined, () => undefined);
-    return task;
-  }, [onProjectChange, saveState, setSaveState]);
+    }).catch(reportOperationError);
+  }, [reportOperationError]);
 
-  const handleEncodingConverted = useCallback((converted: ProjectSnapshot) => {
-    const sequence = draftSequenceRef.current + 1;
-    draftSequenceRef.current = sequence;
-    draftActiveRef.current = false;
-    setDraftActive(false);
-    const convertedMain = converted.files.find((file) => file.id === converted.mainFile);
-    setSourceDraft(convertedMain?.content ?? "");
-    setEditError(null);
-    projectRef.current = converted;
-    onProjectChange(converted);
-    setSaveState("dirty");
-    scheduleSave(sequence);
-  }, [onProjectChange, scheduleSave, setSaveState]);
-
-  const handleOpenAnother = useCallback(() => {
-    void (async () => {
-      try {
-        const projectPath = await desktopBridge.pickProjectPath();
-        if (projectPath === null) return;
-        await desktopBridge.openProjectWindow(projectPath);
-      } catch (cause) {
-        reportNonSaveFailure(cause);
-      }
-    })();
-  }, [reportNonSaveFailure]);
-
-  const handleSearchCitations = useCallback(async (query: string) => {
-    const current = projectRef.current;
-    const bibliography = current.files.find((file) => file.kind === "bib" && file.content !== null);
-    if (bibliography === undefined) return [];
-    const response = await desktopBridge.searchLocalCitations(current.sessionId, bibliography.id, query);
-    return response.results.map((result) => ({
+  const searchCitations = useCallback(async (query: string) => {
+    const current = session.getSnapshot().project;
+    const bibliographies = current.files.filter((file) => file.kind === "bib" && file.content !== null);
+    const responses = await Promise.all(bibliographies.map((file) => desktopBridge.searchLocalCitations(current.sessionId, file.id, query)));
+    return responses.flatMap((response) => response.results).filter((result, index, all) => all.findIndex((other) => other.key === result.key) === index).map((result) => ({
       key: result.key,
       ...(result.title === null ? {} : { title: result.title }),
       ...(result.authors === null ? {} : { authors: result.authors.split(/\s+and\s+/u) }),
       ...(result.year === null ? {} : { year: result.year }),
     }));
-  }, []);
+  }, [session]);
 
   const runtimeReady = runtimeReadiness?.runtimeManifestKeysConfigured === true
-    && runtimeReadiness.runtimeInstallAvailable
-    && runtimeReadiness.sandboxAttested;
-  const handleCompile = useCallback(() => {
-    const current = projectRef.current;
-    if (!runtimeReady) {
-      setEditError(runtimeReadiness?.reason ?? "The managed runtime and OS sandbox are not ready.");
-      return;
-    }
-    setEditError(null);
+    && runtimeReadiness.runtimeInstallAvailable && runtimeReadiness.sandboxAttested;
+  const compile = useCallback(() => {
+    if (!runtimeReady) return;
+    setOperationError(null);
     setCompileState("compiling");
-    void desktopBridge.startCompile(current.sessionId, current.revision, current.settings.engine)
-      .catch((cause: unknown) => {
-        setCompileState("failed");
-        reportNonSaveFailure(cause);
-      });
-  }, [reportNonSaveFailure, runtimeReadiness, runtimeReady, setCompileState]);
-
-  const source = draftActive ? sourceDraft : (mainFile?.content ?? "");
-  const sourceAvailable = mainFile !== undefined && mainFile.content !== null;
-  const pdfBytes = useMemo(
-    () => pdfArtifact === null ? undefined : Uint8Array.from(pdfArtifact.bytes),
-    [pdfArtifact],
-  );
-  const pdfStale = pdfArtifact !== null && (pdfArtifact.stale || pdfArtifact.revision !== project.revision);
+    void session.compile().catch((cause: unknown) => { setCompileState("failed"); reportOperationError(cause); });
+  }, [reportOperationError, runtimeReady, session, setCompileState]);
+  const pdfBytes = useMemo(() => pdfArtifact === null ? undefined : Uint8Array.from(pdfArtifact.bytes), [pdfArtifact]);
+  const pdfStale = pdfArtifact !== null && (pdfArtifact.stale || pdfArtifact.revision !== project.revision || Object.keys(drafts).length > 0);
   const previewProps = {
     ...(pdfBytes === undefined ? {} : { pdfBytes }),
     stale: pdfStale,
-    compileStatus: runtimeReady ? (compileState === "idle" ? "unavailable" : compileState) : "unavailable" as const,
-    ...(runtimeReady ? { onCompile: handleCompile } : {}),
+    projectTitle: project.title,
+    runtimeReason: state.paused ? "Recover the retained drafts before compiling." : runtimeReadiness?.reason ?? "Checking compiler availability…",
+    compileStatus: runtimeReady ? (compileState === "idle" ? "unavailable" as const : compileState) : "unavailable" as const,
+    ...(runtimeReady && !state.paused ? { onCompile: compile } : {}),
   };
+
+  const editor = (
+    <div className="editor-stack" inert={state.restoring || state.closing}>
+      {[...new Set([...visitedFiles, activeFile?.id])].map((fileId) => {
+        const file = displayedProject.files.find((candidate) => candidate.id === fileId);
+        if (file === undefined) return null;
+        const active = file.id === activeFile?.id;
+        const isVisual = file.kind === "tex" && effectiveMode !== "source";
+        const textAvailable = file.kind !== "asset" && file.encoding === "utf8" && file.content !== null;
+        const change = (source: string, changes?: readonly VisualSourceChange[], basis?: string) => session.edit(file.id, source, changes, basis);
+        return (
+          <div className="file-workspace" key={`${file.id}:${String(state.epoch)}`} hidden={!active}>
+            {textAvailable ? <>
+              {file.kind === "tex" ? <div className="file-editor-surface" hidden={!isVisual}>
+                <VisualEditor source={file.content ?? ""} fileId={file.id} fileName={file.relativePath} onSourceChange={change}
+                  onSearchCitations={searchCitations} active={active && isVisual && effectiveMode !== "preview"}
+                  navigation={navigation} onNavigationFallback={fallbackToSource} />
+              </div> : null}
+              <div className="file-editor-surface" hidden={isVisual}>
+                <Suspense fallback={<div className="editor-loading">Opening source…</div>}>
+                  <SourceEditor value={file.content ?? ""} fileId={file.id} fileName={file.relativePath}
+                    language={file.kind === "tex" || file.kind === "style" ? "latex" : "text"}
+                    authorityState={drafts[file.id] !== undefined || file.dirty ? "working" : "canonical"}
+                    onChange={change} navigation={navigation} active={active && !isVisual && effectiveMode !== "preview"} />
+                </Suspense>
+              </div>
+            </> : file.kind !== "asset" && file.encoding === "nonUtf8" ? (
+              <EncodingConversionPanel project={project} file={file} onConvert={(id, text, hash) => session.convert(id, text, hash)} />
+            ) : <FileDetails file={file} />}
+          </div>
+        );
+      })}
+    </div>
+  );
+
+  const sidebar = <ProjectSidebar project={displayedProject} metrics={metrics} activeFileId={activeFile?.id ?? project.mainFile}
+    onSelectFile={selectFile} onNavigate={navigate} onClose={() => setOutlineOpen(false)} />;
+  const review = <ReviewRail project={project} canRestore={!session.hasChanges && !state.paused && !state.restoring}
+    disabled={state.paused || state.restoring || state.closing}
+    disabledReason={state.paused ? "Resolve the draft error before saving a version." : undefined}
+    onCreateSnapshot={(name) => session.createSnapshot(name)} onRestoreSnapshot={(id) => session.restore(id)} />;
 
   return (
     <div className="workspace" data-theme={theme}>
-      <AppHeader project={project} onOpenAnother={handleOpenAnother} />
+      <AppHeader project={project} activeFileName={activeFile?.relativePath ?? ""} canWrite={canWrite} onOpenAnother={openAnother}
+        onClosePaper={onProjectClosed ? () => { void session.close().then(onProjectClosed).catch(reportOperationError); } : undefined} />
       <div className="workspace__body">
-        {outlineOpen ? <ProjectSidebar project={project} metrics={projectMetrics} /> : null}
+        {!compact && outlineOpen ? sidebar : null}
         <main className="workspace__main">
-          {editError === null ? null : <p className="workspace-error" role="alert">{editError}</p>}
-          {mode === "write" ? sourceAvailable ? <VisualEditor source={source} fileId={project.mainFile} fileName={mainFile.relativePath} onSourceChange={handleSourceChange} onSearchCitations={handleSearchCitations} /> : <SourceOnlyNotice /> : null}
-          {mode === "source" && sourceAvailable ? (
-            <Suspense fallback={<div className="editor-loading">Loading source editor…</div>}>
-              <SourceEditor
-                value={source}
-                fileName={mainFile?.relativePath}
-                authorityState={!sourceAvailable ? "unavailable" : draftActive ? "working" : "canonical"}
-                {...(sourceAvailable ? { onChange: handleSourceChange } : {})}
-              />
-            </Suspense>
-          ) : null}
-          {mode === "source" && !sourceAvailable && mainFile !== undefined ? (
-            <EncodingConversionPanel project={project} file={mainFile} onConverted={handleEncodingConverted} />
-          ) : null}
-          {mode === "preview" ? <PreviewPane {...previewProps} /> : null}
-          {mode === "split" ? sourceAvailable ? <SplitWorkspace source={source} fileId={project.mainFile} fileName={mainFile.relativePath} onSourceChange={handleSourceChange} onSearchCitations={handleSearchCitations} preview={previewProps} /> : <SourceOnlyNotice /> : null}
+          {state.paused ? <section className="draft-recovery" aria-label="Draft recovery" role="alert">
+            <strong>Saving is paused. Your drafts are retained.</strong><p>{state.error}</p>
+            <ul>{Object.entries(drafts).map(([fileId, draft]) => {
+              const name = project.files.find((file) => file.id === fileId)?.relativePath ?? fileId;
+              return <li key={fileId}><button type="button" onClick={() => selectFile(fileId)}>{name}</button>
+                <button type="button" onClick={() => { void navigator.clipboard.writeText(draft.text).catch(reportOperationError); }}>Copy draft</button>
+                <button type="button" onClick={() => { if (window.confirm(`Discard the retained draft for ${name} and return to its accepted source?`)) session.discardDraft(fileId); }}>Discard draft</button></li>;
+            })}</ul>
+            <button type="button" disabled={Object.keys(drafts).length > 0} onClick={() => { void session.retrySave().catch(reportOperationError); }}>Retry saving accepted source</button>
+          </section> : null}
+          {operationError === null ? null : <div className="workspace-error" role="alert"><span>{operationError}</span><button type="button" onClick={() => setOperationError(null)}>Dismiss</button></div>}
+          {state.restoring ? <p role="status">Restoring version…</p> : null}
+          {state.closing ? <p role="status">Saving and closing paper…</p> : null}
+          <SplitWorkspace mode={effectiveMode} editor={editor} preview={previewProps} navigationKey={`${activeFile?.id ?? ""}:${navigation?.requestId ?? ""}`} />
         </main>
-        {reviewPanel === null ? null : (
-          <ReviewRail
-            project={project}
-            canRestore={!draftActive && !project.dirty && saveState === "saved"}
-            onRestoreSnapshot={handleRestoreSnapshot}
-          />
-        )}
+        {!compact && reviewPanel !== null ? review : null}
       </div>
-      <StatusBar project={project} metrics={projectMetrics} runtimeReadiness={runtimeReadiness} />
-      <CommandPalette />
+      {compact ? <ModalOverlay data-theme={theme} isOpen={outlineOpen || reviewPanel !== null} isDismissable className="workspace-drawer-overlay"
+        onOpenChange={(open) => { if (!open) { setOutlineOpen(false); setReviewPanel(null); } }}>
+        <Modal className={`workspace-drawer ${outlineOpen ? "workspace-drawer--left" : "workspace-drawer--right"}`}>
+          <Dialog aria-label={outlineOpen ? "Project navigation" : "Paper tools"}>{outlineOpen ? sidebar : review}</Dialog>
+        </Modal>
+      </ModalOverlay> : null}
+      <StatusBar project={project} metrics={metrics} runtimeReadiness={runtimeReadiness} stale={pdfStale} />
+      <CommandPalette canWrite={canWrite} />
     </div>
   );
 }
 
-function SourceOnlyNotice() {
-  return (
-    <section className="source-only-notice" aria-label="Source-only file">
-      <strong>Visual editing is unavailable for this file.</strong>
-      <p>Its original non-UTF-8 bytes remain untouched. Open Source mode to review and explicitly approve a UTF-8 conversion.</p>
-    </section>
-  );
+function FileDetails({ file }: { file: ProjectFile }) {
+  return <section className="file-details" aria-label="File details"><span className="eyebrow">{file.kind === "asset" ? "Project asset" : "Source unavailable"}</span>
+    <h1>{file.relativePath.split("/").at(-1)}</h1><p>{file.kind === "asset" ? "This asset is part of your paper. Its original file is preserved." : "This file cannot be opened as text. Its original bytes are preserved."}</p>
+    <dl><dt>Path</dt><dd>{file.relativePath}</dd><dt>Size</dt><dd>{file.byteLength.toLocaleString()} bytes</dd><dt>Type</dt><dd>{file.kind}</dd></dl>
+  </section>;
 }

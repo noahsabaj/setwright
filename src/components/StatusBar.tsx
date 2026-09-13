@@ -8,9 +8,10 @@ interface StatusBarProps {
   project: ProjectSnapshot;
   metrics: ProjectMetrics;
   runtimeReadiness: RuntimeReadiness | null;
+  stale?: boolean;
 }
 
-export function StatusBar({ project, metrics, runtimeReadiness }: StatusBarProps) {
+export function StatusBar({ project, metrics, runtimeReadiness, stale = false }: StatusBarProps) {
   const saveState = useWorkspaceStore((state) => state.saveState);
   const compileState = useWorkspaceStore((state) => state.compileState);
   const mode = useWorkspaceStore((state) => state.mode);
@@ -18,14 +19,14 @@ export function StatusBar({ project, metrics, runtimeReadiness }: StatusBarProps
   const sourceColumn = useWorkspaceStore((state) => state.sourceColumn);
 
   const SaveIcon = saveState === "saving" ? LoaderCircle : saveState === "conflict" ? CircleAlert : Check;
-  const saveLabel = desktopBridge.runtime === "browserDemo" ? "Demo draft · not written" : ({
+  const saveLabel = saveState === "conflict" ? "Saving paused · drafts retained" : desktopBridge.runtime === "browserDemo" ? "Demo draft · not written" : ({
     saved: "Saved locally",
     saving: "Saving…",
     dirty: "Unsaved changes",
     conflict: "External change conflict",
   }[saveState]);
   const compilePresentation = compileState === "success"
-    ? { label: "PDF up to date", Icon: CheckCircle2 }
+    ? { label: stale ? "PDF needs updating" : "PDF up to date", Icon: stale ? FileClock : CheckCircle2 }
     : compileState === "compiling"
       ? { label: "Compiling…", Icon: LoaderCircle }
       : compileState === "failed"

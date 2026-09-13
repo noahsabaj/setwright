@@ -1,6 +1,7 @@
 import { useId, useState } from "react";
-import { BookOpen, Braces, Code2, Footprints, Image, Quote, Sigma, Table2, X } from "lucide-react";
+import { BookOpen, Code2, Footprints, Image, Quote, Sigma, Table2, X } from "lucide-react";
 import { Dialog, Modal, ModalOverlay } from "react-aria-components";
+import { useWorkspaceStore } from "../store/workspace-store";
 
 export type InsertKind = "insert" | "citation" | "equation" | "figure" | "table";
 
@@ -26,7 +27,9 @@ interface InsertDialogProps {
   onSearchCitations?: ((query: string) => Promise<CitationSearchResult[]>) | undefined;
 }
 
-export function InsertDialog({ kind, onClose, onInsert, onSearchCitations }: InsertDialogProps) {
+export function InsertDialog({ kind: initialKind, onClose, onInsert, onSearchCitations }: InsertDialogProps) {
+  const theme = useWorkspaceStore((store) => store.theme);
+  const [kind, setKind] = useState(initialKind);
   const titleId = useId();
   const [primary, setPrimary] = useState("");
   const [secondary, setSecondary] = useState("");
@@ -62,14 +65,14 @@ export function InsertDialog({ kind, onClose, onInsert, onSearchCitations }: Ins
   };
 
   return (
-    <ModalOverlay className="modal-layer" isOpen isDismissable onOpenChange={(open) => { if (!open) onClose(); }}>
+    <ModalOverlay className="modal-layer" data-theme={theme} isOpen isDismissable onOpenChange={(open) => { if (!open) onClose(); }}>
       <Modal className="insert-dialog">
         <Dialog aria-labelledby={titleId}>
         <header className="insert-dialog__header">
           <div>
             <span className="eyebrow">Insert</span>
             <h2 id={titleId}>
-              {kind === "insert" ? "Scientific structure" : kind.charAt(0).toUpperCase() + kind.slice(1)}
+              {kind === "insert" ? "Add to your paper" : kind.charAt(0).toUpperCase() + kind.slice(1)}
             </h2>
           </div>
           <button className="icon-button" type="button" aria-label="Close dialog" onClick={onClose}><X size={18} /></button>
@@ -77,12 +80,15 @@ export function InsertDialog({ kind, onClose, onInsert, onSearchCitations }: Ins
 
         {kind === "insert" ? (
           <div className="insert-grid">
-            <button type="button" onClick={() => insertSimple("theorem", "")}><Sigma /><strong>Theorem</strong><span>Numbered statement</span></button>
-            <button type="button" onClick={() => insertSimple("definition", "")}><BookOpen /><strong>Definition</strong><span>Numbered definition</span></button>
-            <button type="button" onClick={() => insertSimple("proof", "")}><Footprints /><strong>Proof</strong><span>Proof environment</span></button>
-            <button type="button" onClick={() => insertSimple("code", "Code listing")}><Code2 /><strong>Code listing</strong><span>Listings-compatible</span></button>
-            <button type="button" onClick={() => insertSimple("quote", "Quote")}><Quote /><strong>Block quote</strong><span>Long quotation</span></button>
-            <button type="button" disabled title="Visual footnote insertion is not connected yet."><Braces /><strong>Footnote</strong><span>Unavailable</span></button>
+            <button type="button" aria-label="Figure" onClick={() => setKind("figure")}><Image /><strong>Figure</strong><span>Image and caption</span></button>
+            <button type="button" aria-label="Table" onClick={() => setKind("table")}><Table2 /><strong>Table</strong><span>Rows and columns</span></button>
+            <button type="button" aria-label="Citation" onClick={() => setKind("citation")}><BookOpen /><strong>Citation</strong><span>From your bibliography</span></button>
+            <button type="button" aria-label="Equation" onClick={() => setKind("equation")}><Sigma /><strong>Equation</strong><span>Display mathematics</span></button>
+            <button type="button" aria-label="Theorem" onClick={() => insertSimple("theorem", "")}><Sigma /><strong>Theorem</strong><span>Numbered statement</span></button>
+            <button type="button" aria-label="Definition" onClick={() => insertSimple("definition", "")}><BookOpen /><strong>Definition</strong><span>Numbered definition</span></button>
+            <button type="button" aria-label="Proof" onClick={() => insertSimple("proof", "")}><Footprints /><strong>Proof</strong><span>Proof environment</span></button>
+            <button type="button" aria-label="Code listing" onClick={() => insertSimple("code", "Code listing")}><Code2 /><strong>Code listing</strong><span>Listings-compatible</span></button>
+            <button type="button" aria-label="Block quote" onClick={() => insertSimple("quote", "Quote")}><Quote /><strong>Block quote</strong><span>Long quotation</span></button>
           </div>
         ) : null}
 

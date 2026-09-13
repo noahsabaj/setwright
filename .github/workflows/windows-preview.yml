@@ -1,0 +1,75 @@
+name: Windows authoring preview
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag at this commit (for example v0.2.0)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-preview-release
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: windows-2022
+    environment: release
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24.12.0
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: 1.95.0
+      - name: Check version, tag and signing identity
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          node scripts/release.mjs check $env:RELEASE_TAG
+          if ($LASTEXITCODE -ne 0) { throw 'Version check failed.' }
+          $tagCommit = git rev-list -n 1 $env:RELEASE_TAG
+          if ($LASTEXITCODE -ne 0 -or $tagCommit -ne $env:GITHUB_SHA) { throw 'The tag must point to the selected workflow commit.' }
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) { throw 'The persistent updater signing key is required.' }
+      - name: Verify source
+        shell: pwsh
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed.' }
+          pnpm lint
+          if ($LASTEXITCODE -ne 0) { throw 'Lint failed.' }
+          pnpm test
+          if ($LASTEXITCODE -ne 0) { throw 'Frontend tests failed.' }
+          cargo test --manifest-path src-tauri/Cargo.toml --lib
+          if ($LASTEXITCODE -ne 0) { throw 'Native tests failed.' }
+      - name: Build signed updater artifacts
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: ./scripts/package-windows.ps1
+      - name: Create reviewable draft release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node scripts/release.mjs notes release-notes.md
+          if ($LASTEXITCODE -ne 0) { throw 'Release notes failed.' }
+          $assets = @(Get-ChildItem src-tauri/target/release/bundle/nsis -File | Where-Object { $_.Extension -in '.exe', '.sig' -or $_.Name -eq 'latest.json' } | ForEach-Object FullName)
+          if ($assets.Count -ne 3) { throw 'Expected exactly one installer, signature and manifest.' }
+          gh release create $env:RELEASE_TAG --verify-tag --draft --title "Setwright $env:RELEASE_TAG" --notes-file release-notes.md @assets
+          if ($LASTEXITCODE -ne 0) { throw 'Draft release creation failed; inspect any existing release before retrying.' }

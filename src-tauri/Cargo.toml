@@ -1,7 +1,7 @@
 [package]
 name = "setwright-desktop"
 default-run = "setwright-desktop"
-version = "0.1.0"
+version = "0.2.0"
 description = "A local-first visual editor for LaTeX research papers"
 authors = ["Setwright contributors"]
 license = "Apache-2.0"
@@ -47,6 +47,7 @@ url = "2.5"
 walkdir = "2"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 zstd = "0.13.3"
+tauri-plugin-updater = "2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"

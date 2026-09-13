@@ -1,6 +1,6 @@
 {
   "name": "setwright",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "license": "Apache-2.0",
@@ -18,9 +18,12 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "node scripts/build.mjs",
+    "version:check": "node scripts/release.mjs check",
+    "release:prepare": "node scripts/release.mjs prepare",
+    "package:windows": "powershell -NoProfile -File scripts/package-windows.ps1",
     "preview": "vite preview",
-    "test": "vitest run",
+    "test": "vitest run && node --test scripts/release-checks.mjs",
     "test:watch": "vitest",
     "lint": "eslint . --max-warnings 0",
     "check:rust": "cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings && cargo test --manifest-path src-tauri/Cargo.toml --all-features",

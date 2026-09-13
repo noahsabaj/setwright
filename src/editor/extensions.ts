@@ -224,7 +224,7 @@ const FileBoundaryNode = Node.create({
 });
 
 export const editorExtensions = [
-  StarterKit.configure({ heading: { levels: [1, 2, 3] }, link: false, underline: false }),
+  StarterKit.configure({ heading: { levels: [1, 2, 3] }, link: false, underline: false, trailingNode: false }),
   Underline,
   Link.configure({ openOnClick: false, autolink: true, HTMLAttributes: { rel: "noopener noreferrer" } }),
   Placeholder.configure({ placeholder: "Write something, or type / for commands…" }),

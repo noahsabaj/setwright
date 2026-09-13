@@ -2,6 +2,9 @@ import { useEffect } from "react";
 import type { FormEvent } from "react";
 import type { NodeViewProps } from "@tiptap/react";
 import { NodeViewWrapper } from "@tiptap/react";
+// Vite bundles the relative font URLs locally; MathLive detects this stylesheet
+// and skips its runtime /fonts discovery (which points into Vite's cache).
+import "mathlive/fonts.css";
 
 export function EquationNodeView({ node, selected, updateAttributes }: NodeViewProps) {
   const latex = String(node.attrs.latex);

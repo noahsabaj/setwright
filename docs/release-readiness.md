@@ -22,7 +22,11 @@ completed; a claim without reproducible evidence does not close a gate.
 | Independent security review | Open | Resolved findings or documented accepted risks for the release candidate |
 | Name and mark clearance | Open | Counsel-reviewed clearance search, ownership decision, and any desired filings for Setwright and the tagline |
 
-There are currently no signed release artifacts. Do not change this document to
+The 0.2.0 Windows authoring installer has a local updater signature and installs
+with a Start menu entry. This is not Authenticode certification, cross-platform
+release acceptance, or a clean-machine N to N+1 update exercise. See
+[application releases](app-releases.md) for the implementation and workflow.
+Do not change this document to
 `Complete` merely because a workflow uploaded an unsigned artifact or a local
 machine had TeX installed.
 

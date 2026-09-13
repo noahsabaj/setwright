@@ -60,6 +60,8 @@ export interface VisualSourceChange {
 export interface LatexReconstruction {
   source: string;
   changes: readonly VisualSourceChange[];
+  /** Presentation-only ranges in the current output, never serialized into source. */
+  ranges: readonly { nodeIndex: number; startOffset: number; endOffset: number }[];
 }
 
 interface BlockDraft {
@@ -156,12 +158,20 @@ export function reconstructLatex(projection: LatexProjection, document: JSONCont
   const seenOwners = new Set<string>();
   const changes: VisualSourceChange[] = [];
   const fragments: string[] = [];
+  const ranges: { nodeIndex: number; startOffset: number; endOffset: number }[] = [];
+  let sourceOffset = 0;
+
+  const appendFragment = (fragment: string) => {
+    ranges.push({ nodeIndex: fragments.length, startOffset: sourceOffset, endOffset: sourceOffset + fragment.length });
+    sourceOffset += fragment.length;
+    fragments.push(fragment);
+  };
 
   for (const node of document.content ?? []) {
     const ownerId = sourceAttribute(node, "sourceOwnerId");
     if (ownerId === null) {
       const replacement = `${serializeNewBlock(node, projection.newline)}${projection.newline}${projection.newline}`;
-      fragments.push(replacement);
+      appendFragment(replacement);
       changes.push({ ownerId: null, fileId: projection.fileId, startByte: null, endByte: null, replacement });
       continue;
     }
@@ -181,7 +191,7 @@ export function reconstructLatex(projection: LatexProjection, document: JSONCont
     if (replacement !== owner.original && preservesTextualTrivia(owner.kind)) {
       replacement = preserveEquivalentWhitespace(owner.original, replacement);
     }
-    fragments.push(replacement);
+    appendFragment(replacement);
     if (replacement !== owner.original) {
       changes.push(minimalOwnedChange(owner, replacement));
     }
@@ -193,7 +203,7 @@ export function reconstructLatex(projection: LatexProjection, document: JSONCont
     }
   }
 
-  return { source: fragments.join(""), changes };
+  return { source: fragments.join(""), changes, ranges };
 }
 
 function scanSource(source: string): BlockDraft[] {

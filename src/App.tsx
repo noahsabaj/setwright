@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useState } from "react";
 import type { ProjectSnapshot } from "./lib/contracts";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { desktopBridge } from "./lib/bridge";
+import { UpdateCenter } from "./components/UpdateCenter";
 
 const WorkspaceShell = lazy(async () => {
   const module = await import("./components/WorkspaceShell");
@@ -29,9 +30,9 @@ export function App() {
     return <main className="app-loading" role="alert">{bootstrapError}</main>;
   }
 
-  return project === null ? <WelcomeScreen onEnter={setProject} /> : (
+  return <><div className="desktop-content">{project === null ? <WelcomeScreen onEnter={setProject} /> : (
     <Suspense fallback={<main className="app-loading" aria-live="polite">Preparing your workspace…</main>}>
-      <WorkspaceShell project={project} onProjectChange={setProject} />
+      <WorkspaceShell key={project.sessionId} project={project} onProjectChange={setProject} onProjectClosed={() => setProject(null)} />
     </Suspense>
-  );
+  )}</div><UpdateCenter paperOpen={project !== null} /></>;
 }

@@ -1,16 +1,20 @@
 import { useMemo, useState } from "react";
 import type { CSSProperties } from "react";
-import { AlertTriangle, BookOpen, Hash, Search } from "lucide-react";
-import type { ProjectMetrics } from "../lib/project-metrics";
+import { AlertTriangle, BookOpen, Hash, Search, X } from "lucide-react";
+import type { ProjectMetrics, ProjectOutlineItem } from "../lib/project-metrics";
 import type { ProjectSnapshot } from "../lib/contracts";
 import { ProjectFileIcon } from "./ProjectFileIcon";
 
 interface ProjectSidebarProps {
   project: ProjectSnapshot;
   metrics: ProjectMetrics;
+  activeFileId: string;
+  onSelectFile: (fileId: string) => void;
+  onNavigate: (item: ProjectOutlineItem) => void;
+  onClose?: (() => void) | undefined;
 }
 
-export function ProjectSidebar({ project, metrics }: ProjectSidebarProps) {
+export function ProjectSidebar({ project, metrics, activeFileId, onSelectFile, onNavigate, onClose }: ProjectSidebarProps) {
   const [query, setQuery] = useState("");
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const visibleOutline = useMemo(() => metrics.outline.filter((item) => (
@@ -24,6 +28,10 @@ export function ProjectSidebar({ project, metrics }: ProjectSidebarProps) {
 
   return (
     <aside className="project-sidebar" aria-label="Project and document outline">
+      <div className="sidebar-header">
+        <strong>Navigate paper</strong>
+        {onClose === undefined ? null : <button className="icon-button" type="button" aria-label="Close navigation" onClick={onClose}><X size={16} /></button>}
+      </div>
       <div className="sidebar-search">
         <Search size={14} aria-hidden="true" />
         <input
@@ -47,14 +55,16 @@ export function ProjectSidebar({ project, metrics }: ProjectSidebarProps) {
           <ol className="outline-list">
             {visibleOutline.map((item) => (
               <li key={item.id}>
-                <div
+                <button
+                  type="button"
                   className="outline-entry"
                   style={{ "--outline-depth": item.depth } as CSSProperties}
                   title={item.filePath}
+                  onClick={() => onNavigate(item)}
                 >
                   <span className="outline-marker" aria-hidden="true">{item.kind === "abstract" ? "A" : "§"}</span>
                   <span>{item.label ?? "Heading title unavailable"}</span>
-                </div>
+                </button>
               </li>
             ))}
           </ol>
@@ -71,11 +81,17 @@ export function ProjectSidebar({ project, metrics }: ProjectSidebarProps) {
           <ul className="file-list">
             {visibleFiles.map((file) => (
               <li key={file.id}>
-                <div className={`file-entry${file.id === project.mainFile ? " is-active" : ""}`}>
+                <button
+                  type="button"
+                  className={`file-entry${file.id === activeFileId ? " is-active" : ""}`}
+                  aria-current={file.id === activeFileId ? "page" : undefined}
+                  title={file.relativePath}
+                  onClick={() => onSelectFile(file.id)}
+                >
                   <ProjectFileIcon kind={file.kind} />
                   <span>{file.relativePath}</span>
                   {file.dirty ? <span className="dirty-dot" aria-label="Unsaved" /> : null}
-                </div>
+                </button>
               </li>
             ))}
           </ul>
