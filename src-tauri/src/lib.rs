@@ -1,6 +1,7 @@
 pub mod core;
 pub mod ipc;
 pub mod services;
+pub mod updates;
 
 // The native entry point is not part of the unit-test harness. Keeping it out
 // of that target also keeps native dialog code (which requires an executable
@@ -14,10 +15,12 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(command_builder.invoke_handler())
         .setup(move |app| {
             command_builder.mount_events(app);
             let app_data_directory = app.path().app_data_dir()?;
+            app.manage(updates::UpdateState::open(app_data_directory.clone()));
             app.manage(ipc::DesktopState::open(app_data_directory)?);
             Ok(())
         })

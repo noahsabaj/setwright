@@ -1,12 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Setwright",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "org.setwright.desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "node scripts/build.mjs",
     "frontendDist": "../dist"
   },
   "app": {
@@ -19,8 +19,9 @@
         "title": "Setwright",
         "width": 1440,
         "height": 920,
-        "minWidth": 980,
-        "minHeight": 680,
+        "minWidth": 360,
+        "minHeight": 480,
+        "zoomHotkeysEnabled": true,
         "resizable": true,
         "center": true
       }
@@ -33,9 +34,22 @@
     "shortDescription": "Write papers, not TeX.",
     "longDescription": "A local-first visual editor for standard LaTeX research papers.",
     "copyright": "Copyright Setwright contributors",
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
+    "windows": { "nsis": { "installMode": "currentUser", "displayLanguageSelector": false } },
     "macOS": {
       "minimumSystemVersion": "13.0"
     },
-    "createUpdaterArtifacts": false
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/noahsabaj/setwright/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDhFQUMxNTVCQTQyRjQ5MkEKUldRcVNTK2tXeFdzanRPblROa1hYaytaY0NHajhoUkVUSWpoT1lURTA4NUYvMXpDTzFzR2JKL2sK",
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

@@ -3,5 +3,5 @@
   "identifier": "main-window",
   "description": "Minimal capability set for the Setwright main window",
   "windows": ["main", "project-*"],
-  "permissions": ["core:default", "dialog:allow-open", "dialog:allow-save"]
+  "permissions": ["core:default", "core:window:allow-destroy", "core:webview:allow-set-webview-zoom", "dialog:allow-open", "dialog:allow-save"]
 }

@@ -1,8 +1,8 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../App";
-import { resetMockBridge } from "../lib/bridge";
+import { desktopBridge, resetMockBridge } from "../lib/bridge";
 import { useWorkspaceStore } from "../store/workspace-store";
 
 vi.mock("mathlive", () => ({}));
@@ -10,89 +10,104 @@ vi.mock("mathlive", () => ({}));
 async function enterDemoWorkspace() {
   const user = userEvent.setup();
   render(<App />);
-  await user.click(screen.getByRole("button", { name: /create paper/i }));
-  await screen.findByLabelText("Visual paper editor");
+  await user.click(screen.getByRole("button", { name: /Open a paper/i }));
+  await screen.findByRole("region", { name: "Visual paper editor" }, { timeout: 5_000 });
   return user;
 }
 
-describe("Setwright desktop workspace", () => {
+describe("Setwright authoring workspace", () => {
   beforeEach(() => {
+    vi.restoreAllMocks();
     resetMockBridge();
     useWorkspaceStore.setState({
-      mode: "split",
-      theme: "light",
-      saveState: "saved",
-      outlineOpen: true,
-      reviewPanel: null,
-      commandPaletteOpen: false,
-      compileState: "idle",
+      mode: "write", theme: "light", saveState: "saved", outlineOpen: true,
+      reviewPanel: null, commandPaletteOpen: false, compileState: "idle", splitRatio: 54,
     });
   });
 
-  it("moves from the locked identity screen into the split writing workspace", async () => {
-    const user = userEvent.setup();
-    render(<App />);
-
-    expect(screen.getByRole("heading", { name: "Write papers, not TeX." })).toBeInTheDocument();
-    expect(screen.getByText(/local-first, open-source visual editor/i)).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: /research article/i })).toBeChecked();
-
-    await user.click(screen.getByRole("button", { name: /create paper/i }));
-
-    expect(await screen.findByRole("tab", { name: "Split" }, { timeout: 5_000 })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByRole("toolbar", { name: "Writing tools" })).toBeInTheDocument();
-    expect(screen.getByLabelText("Compiled PDF preview")).toHaveTextContent("No PDF compiled");
-    expect(screen.getByLabelText("Compiled PDF preview")).not.toHaveTextContent("Retrieval-Augmented Models Under Distribution Shift");
-    expect(screen.getByText("Demo draft · not written")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /suggestion mode/i })).not.toBeInTheDocument();
-    expect(screen.getByText("Method")).toBeInTheDocument();
-    const sourceMetrics = screen.getByLabelText("Project source metrics");
-    expect(within(sourceMetrics).getByText("References")).toBeInTheDocument();
-    expect(within(sourceMetrics).getByText("2")).toBeInTheDocument();
+  it("opens into a quiet Write workspace with collapsed preserved source", async () => {
+    await enterDemoWorkspace();
+    expect(screen.getByRole("tab", { name: "Write" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("toolbar", { name: "Writing tools" })).toBeVisible();
+    expect(screen.queryByRole("region", { name: "Compiled PDF preview" })).not.toBeInTheDocument();
+    const raw = screen.getAllByLabelText(/Raw .* source/);
+    expect(raw.length).toBeGreaterThan(0);
+    expect(raw.every((input) => input.closest("details")?.open === false)).toBe(true);
+    expect(screen.getByText("Demo draft · not written")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Comments" })).not.toBeInTheDocument();
   });
 
-  it("switches between Write, Source, Preview, and Split modes", async () => {
+  it("switches modes while retaining the same file editor instances", async () => {
     const user = await enterDemoWorkspace();
-    const tabs = screen.getByRole("tablist", { name: "Workspace view" });
-
-    await user.click(within(tabs).getByRole("tab", { name: "Source" }));
-    expect(await screen.findByLabelText("LaTeX source editor")).toBeInTheDocument();
-
-    await user.click(within(tabs).getByRole("tab", { name: "Preview" }));
-    expect(screen.getByLabelText("Compiled PDF preview")).toBeInTheDocument();
-
-    await user.click(within(tabs).getByRole("tab", { name: "Write" }));
-    expect(screen.getByLabelText("Visual paper editor")).toBeInTheDocument();
+    const visual = screen.getByRole("region", { name: "Visual paper editor" });
+    await user.click(screen.getByRole("tab", { name: "Source" }));
+    const source = await screen.findByRole("region", { name: "LaTeX source editor" });
+    expect(visual).not.toBeVisible();
+    await user.click(screen.getByRole("tab", { name: "Preview" }));
+    expect(screen.getByRole("region", { name: "Compiled PDF preview" })).toBeVisible();
+    expect(source).not.toBeVisible();
+    await user.click(screen.getByRole("tab", { name: "Split" }));
+    expect(screen.getByRole("separator", { name: /Resize editor/ })).toBeVisible();
+    expect(screen.getByRole("region", { name: "Visual paper editor" })).toBe(visual);
+    await user.click(screen.getByRole("tab", { name: "Source" }));
+    expect(screen.getByRole("region", { name: "LaTeX source editor" })).toBe(source);
   });
 
-  it("opens the focus-managed command palette from the keyboard", async () => {
+  it("opens and runs a command entirely by keyboard", async () => {
     const user = await enterDemoWorkspace();
     await user.keyboard("{Control>}k{/Control}");
-
     const palette = screen.getByRole("dialog", { name: "Command palette" });
-    expect(within(palette).queryByRole("option", { name: /suggestion/i })).not.toBeInTheDocument();
-    expect(within(palette).queryByRole("option", { name: /arxiv/i })).not.toBeInTheDocument();
-    const search = within(palette).getByPlaceholderText(/search commands/i);
+    const search = within(palette).getByRole("combobox", { name: "Search commands" });
     expect(search).toHaveFocus();
     await user.type(search, "version history");
-    await user.click(within(palette).getByRole("option", { name: /open version history/i }));
-    expect(screen.getByRole("complementary", { name: "Review and history" })).toBeInTheDocument();
+    await user.keyboard("{Enter}");
+    expect(screen.getByRole("complementary", { name: "Version history" })).toBeVisible();
+    expect(screen.queryByRole("dialog", { name: "Command palette" })).not.toBeInTheDocument();
   });
 
-  it("resizes the split with an accessible keyboard separator", async () => {
+  it("navigates included headings and files without writing source", async () => {
+    const apply = vi.spyOn(desktopBridge, "applySourceEdits");
     const user = await enterDemoWorkspace();
-    const splitter = screen.getByRole("separator", { name: /resize editor and pdf preview/i });
-    expect(splitter).toHaveAttribute("aria-valuenow", "54");
-    splitter.focus();
-    await user.keyboard("{ArrowLeft}{ArrowLeft}");
-    expect(splitter).toHaveAttribute("aria-valuenow", "50");
+    const sidebar = screen.getByRole("complementary", { name: "Project and document outline" });
+    const mainEditor = screen.getByRole("region", { name: "Visual paper editor" });
+    await user.click(within(sidebar).getByRole("button", { name: "Method" }));
+    const methodEditor = screen.getByRole("region", { name: "Visual paper editor" });
+    expect(within(methodEditor).getByRole("heading", { name: "Method" })).toBeVisible();
+    expect(within(sidebar).getByRole("button", { name: "sections/method.tex" })).toHaveAttribute("aria-current", "page");
+    await user.click(within(sidebar).getByRole("button", { name: "references.bib" }));
+    expect(screen.getByRole("tab", { name: "Write" })).toHaveAttribute("aria-disabled", "true");
+    expect(await screen.findByRole("region", { name: "LaTeX source editor" })).toHaveTextContent("references.bib");
+    await user.click(within(sidebar).getByRole("button", { name: "figures/shift-overview.pdf" }));
+    expect(screen.getByRole("region", { name: "File details" })).toHaveTextContent("Project asset");
+    expect(screen.queryByRole("region", { name: "LaTeX source editor" })).not.toBeInTheDocument();
+    await user.click(within(sidebar).getByRole("button", { name: "main.tex" }));
+    await user.click(screen.getByRole("tab", { name: "Write" }));
+    expect(screen.getByRole("region", { name: "Visual paper editor" })).toBe(mainEditor);
+    expect(apply).not.toHaveBeenCalled();
   });
 
-  it("exposes canonical raw source alongside safely supported scientific nodes", async () => {
-    await enterDemoWorkspace();
-    const rawSources = screen.getAllByLabelText(/Raw .* source/i);
-    expect(rawSources.some((element) => (element as HTMLTextAreaElement).value.includes("\\begin{table}"))).toBe(true);
-    expect(screen.getByLabelText("Editable display equation")).toBeInTheDocument();
-    expect(screen.getByText("lewis2020rag")).toBeInTheDocument();
+  it("edits only the selected file and preserves its undo through file navigation", async () => {
+    const apply = vi.spyOn(desktopBridge, "applySourceEdits");
+    const user = await enterDemoWorkspace();
+    const sidebar = screen.getByRole("complementary", { name: "Project and document outline" });
+    await user.click(within(sidebar).getByRole("button", { name: "Method" }));
+    const editor = within(screen.getByRole("region", { name: "Visual paper editor" })).getByLabelText("Paper editor");
+    const paragraph = within(editor).getByText(/We evaluate three controlled shifts/);
+    await user.click(paragraph);
+    const range = document.createRange();
+    range.selectNodeContents(paragraph);
+    range.collapse(false);
+    window.getSelection()?.removeAllRanges();
+    window.getSelection()?.addRange(range);
+    await user.keyboard(" Added sentence.");
+    await waitFor(() => expect(apply).toHaveBeenCalled());
+    expect(apply.mock.calls.every((call) => call[2].every((edit) => edit.fileId === "file-method"))).toBe(true);
+    await user.click(within(sidebar).getByRole("button", { name: "main.tex" }));
+    await user.click(within(sidebar).getByRole("button", { name: /sections\/method.tex/ }));
+    expect(editor).toBeVisible();
+    expect(editor).toHaveTextContent("Added sentence.");
+    await user.click(screen.getByRole("button", { name: "Undo" }));
+    expect(editor).not.toHaveTextContent("Added sentence.");
+    await waitFor(() => expect(apply.mock.calls.length).toBeGreaterThan(1));
   });
 });

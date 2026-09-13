@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { EditorContent, useEditor } from "@tiptap/react";
+import { EditorState, Selection } from "@tiptap/pm/state";
 import { FileText } from "lucide-react";
 import { editorExtensions } from "../editor/extensions";
 import { insertVisualBlock } from "../editor/insert-visual-block";
 import { projectLatex, reconstructLatex } from "../editor/latex-roundtrip";
 import type { LatexProjection, VisualSourceChange } from "../editor/latex-roundtrip";
-import { useWorkspaceStore } from "../store/workspace-store";
+import type { SourceNavigation } from "../editor/navigation";
 import { EditorToolbar } from "./EditorToolbar";
 import { InsertDialog } from "./InsertDialog";
 import type { CitationSearchResult, InsertKind, InsertPayload } from "./InsertDialog";
@@ -16,12 +17,14 @@ interface VisualEditorProps {
   fileName?: string | undefined;
   onSourceChange: (nextSource: string, changes?: readonly VisualSourceChange[], basisSource?: string) => void;
   onSearchCitations?: ((query: string) => Promise<CitationSearchResult[]>) | undefined;
+  navigation?: SourceNavigation | undefined;
+  onNavigationFallback?: ((request: SourceNavigation) => void) | undefined;
+  active?: boolean | undefined;
 }
 
-export function VisualEditor({ source, fileId, fileName = "main.tex", onSourceChange, onSearchCitations }: VisualEditorProps) {
+export function VisualEditor({ source, fileId, fileName = "main.tex", onSourceChange, onSearchCitations, navigation, onNavigationFallback, active = true }: VisualEditorProps) {
   const [dialog, setDialog] = useState<InsertKind | null>(null);
   const [roundTripError, setRoundTripError] = useState<{ message: string; source: string } | null>(null);
-  const setReviewPanel = useWorkspaceStore((state) => state.setReviewPanel);
   const [initialProjection] = useState<LatexProjection>(() => projectLatex(source, fileId));
   const projectionRef = useRef(initialProjection);
   const onSourceChangeRef = useRef(onSourceChange);
@@ -29,6 +32,8 @@ export function VisualEditor({ source, fileId, fileName = "main.tex", onSourceCh
   const canonicalSourceRef = useRef({ source, fileId });
   const lastEmittedSourceRef = useRef(source);
   const lastAcceptedDocumentRef = useRef(initialProjection.document);
+  const handledNavigationRef = useRef<number | null>(null);
+  const scrollerRef = useRef<HTMLDivElement>(null);
 
   const editor = useEditor({
     extensions: editorExtensions,
@@ -85,9 +90,90 @@ export function VisualEditor({ source, fileId, fileName = "main.tex", onSourceCh
     lastAcceptedDocumentRef.current = projection.document;
     canonicalSourceRef.current = { source, fileId };
     lastEmittedSourceRef.current = source;
-    editor.commands.setContent(projection.document, { emitUpdate: false });
+    // setContent suppresses the update callback, but still adds a replacement
+    // to ProseMirror history. A new canonical epoch must discard that history.
+    editor.view.updateState(EditorState.create({
+      schema: editor.schema,
+      doc: editor.schema.nodeFromJSON(projection.document),
+      plugins: editor.state.plugins,
+    }));
+    editor.view.dispatch(editor.state.tr.setMeta("addToHistory", false));
     applyingCanonicalSourceRef.current = false;
   }, [editor, fileId, source]);
+
+  useEffect(() => {
+    if (editor === null || !active || navigation === undefined || navigation.fileId !== fileId || handledNavigationRef.current === navigation.requestId) return;
+    try {
+      const current = reconstructLatex(projectionRef.current, editor.getJSON());
+      const range = current.ranges.find((candidate) => navigation.sourceOffset >= candidate.startOffset && navigation.sourceOffset < candidate.endOffset);
+      if (current.source !== source || range === undefined) {
+        handledNavigationRef.current = navigation.requestId;
+        onNavigationFallback?.(navigation);
+        return;
+      }
+      const node = editor.state.doc.child(range.nodeIndex);
+      // An outline can name a source-only construct; leave those to Source.
+      if (node.type.name !== "heading" && node.attrs.sourceKind !== "abstract") {
+        handledNavigationRef.current = navigation.requestId;
+        onNavigationFallback?.(navigation);
+        return;
+      }
+      let position = 0;
+      for (let index = 0; index < range.nodeIndex; index += 1) position += editor.state.doc.child(index).nodeSize;
+      const selection = Selection.near(editor.state.doc.resolve(position + 1));
+      editor.view.dispatch(editor.state.tr.setSelection(selection));
+      const target = editor.view.nodeDOM(position);
+      const scroller = scrollerRef.current;
+      if (!(target instanceof HTMLElement) || scroller === null) {
+        handledNavigationRef.current = navigation.requestId;
+        onNavigationFallback?.(navigation);
+        return;
+      }
+      // The selection has been applied once. Subsequent source acknowledgements
+      // must not reapply it while the deferred viewport reveal is still pending.
+      handledNavigationRef.current = navigation.requestId;
+
+      let frame: number | undefined;
+      let disposed = false;
+      const interactionEvents = ["pointerdown", "mousedown", "keydown", "beforeinput", "input", "wheel", "touchstart", "compositionstart"] as const;
+      const stop = () => {
+        disposed = true;
+        if (frame !== undefined) cancelAnimationFrame(frame);
+        resizeObserver.disconnect();
+        visibilityObserver.disconnect();
+        for (const event of interactionEvents) document.removeEventListener(event, stop, true);
+      };
+      const reveal = () => {
+        frame = undefined;
+        if (disposed || editor.isDestroyed || !target.isConnected || scroller.closest('[hidden], [aria-hidden="true"], [inert]') !== null || scroller.getBoundingClientRect().height === 0) return;
+        // Focus can restore the old scroll position. Measure and scroll only
+        // afterwards, and after a closing drawer has restored its trigger focus.
+        editor.view.focus();
+        const top = scroller.scrollTop + target.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 24;
+        scroller.scrollTo({ top: Math.max(0, top), behavior: "instant" });
+        stop();
+      };
+      const scheduleReveal = () => {
+        if (disposed) return;
+        if (frame !== undefined) cancelAnimationFrame(frame);
+        frame = requestAnimationFrame(() => { frame = requestAnimationFrame(reveal); });
+      };
+      const resizeObserver = new ResizeObserver(scheduleReveal);
+      const visibilityObserver = new MutationObserver(scheduleReveal);
+      resizeObserver.observe(scroller);
+      for (let ancestor: HTMLElement | null = scroller; ancestor !== null; ancestor = ancestor.parentElement) {
+        visibilityObserver.observe(ancestor, { attributes: true, attributeFilter: ["hidden", "aria-hidden", "inert"] });
+      }
+      // A later click, keystroke, or scroll takes precedence over navigation.
+      // Programmatic focus restoration during drawer teardown does not.
+      for (const event of interactionEvents) document.addEventListener(event, stop, true);
+      scheduleReveal();
+      return stop;
+    } catch {
+      handledNavigationRef.current = navigation.requestId;
+      onNavigationFallback?.(navigation);
+    }
+  }, [active, editor, fileId, navigation, onNavigationFallback, source]);
 
   if (editor === null) return <div className="editor-loading">Preparing your paper…</div>;
 
@@ -119,18 +205,18 @@ export function VisualEditor({ source, fileId, fileName = "main.tex", onSourceCh
 
   return (
     <section className="visual-editor" aria-label="Visual paper editor">
-      <EditorToolbar editor={editor} onInsert={setDialog} onComment={() => setReviewPanel("comments")} />
+      <EditorToolbar editor={editor} onInsert={setDialog} />
       {roundTripError === null || roundTripError.source !== source ? null : <p className="workspace-error" role="alert">{roundTripError.message}</p>}
-      <div className="visual-editor__scroller">
+      <div className="visual-editor__scroller" ref={scrollerRef}>
         <div className="editor-page">
           <div className="editor-page__meta">
             <span><FileText size={13} aria-hidden="true" /> {fileName}</span>
-            <span>Source-backed visual view</span>
+            <span>Draft</span>
           </div>
           <EditorContent editor={editor} />
         </div>
       </div>
-      {dialog === null ? null : <InsertDialog kind={dialog} onClose={() => setDialog(null)} onInsert={handleInsert} onSearchCitations={onSearchCitations} />}
+      {dialog === null || !active ? null : <InsertDialog kind={dialog} onClose={() => setDialog(null)} onInsert={handleInsert} onSearchCitations={onSearchCitations} />}
     </section>
   );
 }

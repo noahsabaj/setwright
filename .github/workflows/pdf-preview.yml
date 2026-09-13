@@ -1,0 +1,49 @@
+name: PDF browser verification
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  preview:
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-2022, browser: chromium, label: 'PDF preview (windows-2022)' }
+          - { os: ubuntu-22.04, browser: webkit, label: 'PDF preview (ubuntu-22.04)' }
+          - { os: macos-15, browser: webkit, label: 'PDF preview (macos-15)' }
+          - { os: macos-15-intel, browser: webkit, label: 'PDF preview (macos-15-intel)' }
+          - { os: ubuntu-22.04, browser: chromium, floor: true, label: 'PDF preview floor (Chromium 125)' }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      PDF_BROWSER: ${{ matrix.browser }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 24.12.0
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm exec playwright install --with-deps ${{ matrix.browser }}
+      - name: Install verified Chromium 125 floor
+        if: matrix.floor
+        shell: bash
+        run: |
+          curl --fail --location --retry 3 https://storage.googleapis.com/chrome-for-testing-public/125.0.6422.141/linux64/chrome-linux64.zip --output "$RUNNER_TEMP/chrome.zip"
+          echo "757868feb1aeae73a1bfcb1c40c3d0ee0eb03051a3300171fd47e355c15214ec  $RUNNER_TEMP/chrome.zip" | sha256sum --check
+          unzip -q "$RUNNER_TEMP/chrome.zip" -d "$RUNNER_TEMP/chrome125"
+          echo "PDF_BROWSER_PATH=$RUNNER_TEMP/chrome125/chrome-linux64/chrome" >> "$GITHUB_ENV"
+      - run: pnpm exec playwright test --config test/browser/playwright.config.mjs
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: pdf-${{ matrix.os }}-${{ matrix.browser }}-${{ matrix.floor || 'current' }}
+          path: test-results/pdf-browser

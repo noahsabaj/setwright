@@ -1,0 +1,32 @@
+import { test, expect } from "@playwright/test";
+
+test("real PDF worker renders, navigates, retains stale output, and reports bad data", async ({ page }, info) => {
+  const errors = [], workers = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("worker", worker => workers.push(worker.url()));
+  await page.goto("/test/browser/index.html");
+  await expect(page.getByText("PDF ready", { exact: true })).toBeVisible();
+  const canvas = page.locator("canvas.pdf-canvas");
+  await expect(canvas).toBeVisible();
+  const pixel = () => canvas.evaluate(c => Array.from(c.getContext("2d").getImageData(Math.floor(c.width / 2), Math.floor(c.height * 0.7), 1, 1).data));
+  expect(await pixel()).toEqual([255, 0, 0, 255]);
+  await page.getByRole("button", { name: "Next page", exact: true }).click();
+  await expect(canvas).toHaveAttribute("aria-label", "Rendered PDF page 2");
+  await expect(canvas).toBeVisible();
+  expect(await pixel()).toEqual([0, 0, 255, 255]);
+  await page.getByRole("button", { name: "stale", exact: true }).click();
+  await expect(page.getByText("Last successful PDF · stale", { exact: true })).toBeVisible();
+  expect(await pixel()).toEqual([0, 0, 255, 255]);
+  await page.getByRole("button", { name: "failed", exact: true }).click();
+  await expect(page.getByText("Compile failed · previous PDF shown", { exact: true })).toBeVisible();
+  expect(await pixel()).toEqual([0, 0, 255, 255]);
+  await page.getByRole("button", { name: "invalid", exact: true }).click();
+  await expect(page.getByText("PDF preview unavailable", { exact: true })).toBeVisible();
+  await expect(canvas).toBeHidden();
+  await expect(page.getByRole("alert")).toBeVisible();
+  expect(workers.some(url => /pdf.worker/.test(url))).toBe(true);
+  expect(errors).toEqual([]);
+  const userAgent = await page.evaluate(() => navigator.userAgent);
+  if (process.env.PDF_BROWSER_PATH) expect(userAgent).toMatch(/Chrome\/125\./);
+  await info.attach("pdf-browser-evidence", { body: JSON.stringify({ userAgent, workers, errors, platform: process.platform, assertions: ["actual canvas pixels", "page navigation", "stale PDF retained", "failed compile retained", "invalid PDF reported"] }, null, 2), contentType: "application/json" });
+});

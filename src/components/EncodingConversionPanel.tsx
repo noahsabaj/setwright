@@ -6,10 +6,10 @@ import { desktopBridge } from "../lib/bridge";
 interface EncodingConversionPanelProps {
   project: ProjectSnapshot;
   file: ProjectFile;
-  onConverted: (project: ProjectSnapshot) => void;
+  onConvert: (fileId: string, reviewedText: string, originalSha256: string) => Promise<void>;
 }
 
-export function EncodingConversionPanel({ project, file, onConverted }: EncodingConversionPanelProps) {
+export function EncodingConversionPanel({ project, file, onConvert }: EncodingConversionPanelProps) {
   const [preview, setPreview] = useState<Utf8ConversionPreview | null>(null);
   const [reviewedText, setReviewedText] = useState("");
   const [approved, setApproved] = useState(false);
@@ -36,14 +36,7 @@ export function EncodingConversionPanel({ project, file, onConverted }: Encoding
     setBusy(true);
     setError(null);
     try {
-      await desktopBridge.convertFileToUtf8(
-        project.sessionId,
-        project.revision,
-        file.id,
-        reviewedText,
-        preview.originalSha256,
-      );
-      onConverted(await desktopBridge.readProject(project.sessionId));
+      await onConvert(file.id, reviewedText, preview.originalSha256);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "The reviewed conversion was not applied.");
     } finally {

@@ -5,6 +5,11 @@ import * as __TAURI_EVENT from "@tauri-apps/api/event";
 
 /** Commands */
 export const commands = {
+	appUpdateStatus: () => __TAURI_INVOKE<UpdateStatus>("app_update_status"),
+	setAutomaticAppUpdates: (enabled: boolean) => typedError<UpdateStatus, string>(__TAURI_INVOKE("set_automatic_app_updates", { enabled })),
+	checkAppUpdate: () => typedError<UpdateStatus, string>(__TAURI_INVOKE("check_app_update")),
+	downloadAppUpdate: () => typedError<UpdateStatus, string>(__TAURI_INVOKE("download_app_update")),
+	installAppUpdate: () => typedError<null, string>(__TAURI_INVOKE("install_app_update")),
 	createProject: (request: CreateProjectRequest) => typedError<UiProjectSnapshot, AppError>(__TAURI_INVOKE("create_project", { request })),
 	openProject: (rootPath: string, mainFile: string | null) => typedError<UiProjectSnapshot, AppError>(__TAURI_INVOKE("open_project", { rootPath, mainFile })),
 	openProjectWindow: (rootPath: string, mainFile: string | null) => typedError<OpenedProjectWindow, AppError>(__TAURI_INVOKE("open_project_window", { rootPath, mainFile })),
@@ -597,6 +602,17 @@ export type UiSaveResult = {
 };
 
 export type UiSourceEncoding = "utf8" | "nonUtf8";
+
+export type UpdateStatus = {
+	currentVersion: string,
+	phase: string,
+	version: string | null,
+	notes: string | null,
+	automatic: boolean,
+	downloadedBytes: number,
+	totalBytes: number | null,
+	error: string | null,
+};
 
 export type Utf8ConversionPreview = {
 	fileId: FileId,

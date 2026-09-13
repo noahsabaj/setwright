@@ -74,9 +74,29 @@ pub struct DesktopState {
     snapshot_generations: RwLock<HashMap<ProjectSessionId, u64>>,
     last_automatic_snapshots: RwLock<HashMap<String, chrono::DateTime<Utc>>>,
     recovery_directory: PathBuf,
+    application_update: std::sync::atomic::AtomicBool,
 }
 
 impl DesktopState {
+    pub(crate) fn begin_application_update(&self) -> Result<(), String> {
+        let contexts = self.contexts.write();
+        if !contexts.is_empty() {
+            return Err("Save and close all paper windows before installing the update.".into());
+        }
+        if self
+            .application_update
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err("An update is already being installed.".into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn end_application_update(&self) {
+        self.application_update
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
     pub fn open(app_data_directory: impl AsRef<Path>) -> AppResult<Self> {
         let app_data_directory = app_data_directory.as_ref();
         std::fs::create_dir_all(app_data_directory).map_err(|error| {
@@ -118,6 +138,7 @@ impl DesktopState {
             snapshot_generations: RwLock::new(HashMap::new()),
             last_automatic_snapshots: RwLock::new(HashMap::new()),
             recovery_directory,
+            application_update: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -129,10 +150,20 @@ impl DesktopState {
         settings: PaperSettingsV1,
         project_key: String,
     ) -> AppResult<ProjectSessionId> {
+        let mut contexts = self.contexts.write();
+        if self
+            .application_update
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(AppError::InvalidProject {
+                message: "Setwright is installing an update. Open your paper after it restarts."
+                    .into(),
+            });
+        }
         let session_id = session.session_id();
         let replaced = self.registry.insert(session);
         debug_assert_eq!(replaced, session_id);
-        let previous = self.contexts.write().insert(
+        let previous = contexts.insert(
             session_id,
             SessionContext {
                 owner_window: window_label.to_owned(),
@@ -598,14 +629,10 @@ pub fn open_project(
     root_path: String,
     main_file: Option<String>,
 ) -> AppResult<UiProjectSnapshot> {
-    let root = canonical_scoped_directory(&window, Path::new(&root_path))?;
-    let open_path = match main_file {
-        Some(relative) => {
-            let relative = validate_relative_source_path(&relative)?;
-            root.join(relative)
-        }
-        None => root.clone(),
-    };
+    let (root, open_path) =
+        selected_project_paths(Path::new(&root_path), main_file.as_deref(), |path| {
+            window.fs_scope().is_allowed(path)
+        })?;
     let session = ProjectSession::open_path(&open_path)?;
     let core_snapshot = session.snapshot()?;
     let main_relative = session
@@ -640,11 +667,10 @@ pub fn open_project_window(
     root_path: String,
     main_file: Option<String>,
 ) -> AppResult<OpenedProjectWindow> {
-    let root = canonical_scoped_directory(&window, Path::new(&root_path))?;
-    let open_path = match main_file {
-        Some(relative) => root.join(validate_relative_source_path(&relative)?),
-        None => root.clone(),
-    };
+    let (root, open_path) =
+        selected_project_paths(Path::new(&root_path), main_file.as_deref(), |path| {
+            window.fs_scope().is_allowed(path)
+        })?;
     let session = ProjectSession::open_path(&open_path)?;
     let core_snapshot = session.snapshot()?;
     let main_relative = session
@@ -674,7 +700,8 @@ pub fn open_project_window(
     if let Err(error) = tauri::WebviewWindowBuilder::new(window.app_handle(), &window_label, url)
         .title(format!("{title} — Setwright"))
         .inner_size(1440.0, 920.0)
-        .min_inner_size(980.0, 680.0)
+        .min_inner_size(360.0, 480.0)
+        .zoom_hotkeys_enabled(true)
         .build()
     {
         state.contexts.write().remove(&session_id);
@@ -1855,6 +1882,11 @@ pub fn command_builder() -> tauri_specta::Builder<tauri::Wry> {
     tauri_specta::Builder::<tauri::Wry>::new()
         .dangerously_cast_bigints_to_number()
         .commands(tauri_specta::collect_commands![
+            crate::updates::app_update_status,
+            crate::updates::set_automatic_app_updates,
+            crate::updates::check_app_update,
+            crate::updates::download_app_update,
+            crate::updates::install_app_update,
             create_project,
             open_project,
             open_project_window,
@@ -2315,6 +2347,59 @@ fn canonical_scoped_directory(window: &Window, path: &Path) -> AppResult<PathBuf
         });
     }
     Ok(canonical)
+}
+
+/// A main-file selection opens its containing paper without widening the
+/// application's generic filesystem scope. All project I/O remains rooted in
+/// ProjectSession, including its existing include and symlink containment rules.
+fn selected_project_paths(
+    root_path: &Path,
+    main_file: Option<&str>,
+    is_allowed: impl Fn(&Path) -> bool,
+) -> AppResult<(PathBuf, PathBuf)> {
+    let root = root_path
+        .canonicalize()
+        .map_err(|error| AppError::io("canonicalize project directory", root_path, error))?;
+    if !root.is_dir() {
+        return Err(AppError::InvalidPath {
+            path: root.to_string_lossy().into_owned(),
+            message: "a project directory is required".into(),
+        });
+    }
+    let open_path = match main_file {
+        Some(relative) => {
+            let candidate = root.join(validate_relative_source_path(relative)?);
+            let canonical = candidate.canonicalize().map_err(|error| {
+                AppError::io("canonicalize selected main file", &candidate, error)
+            })?;
+            if !canonical.starts_with(&root) {
+                return Err(AppError::PathOutsideRoot {
+                    path: canonical.to_string_lossy().into_owned(),
+                });
+            }
+            if !canonical.is_file()
+                || !canonical
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("tex"))
+            {
+                return Err(AppError::InvalidPath {
+                    path: canonical.to_string_lossy().into_owned(),
+                    message: "select the paper's main .tex file".into(),
+                });
+            }
+            canonical
+        }
+        None => root.clone(),
+    };
+    let selected_main =
+        main_file.is_some() && open_path.parent() == Some(root.as_path()) && is_allowed(&open_path);
+    if !is_allowed(&root) && !selected_main {
+        return Err(AppError::CapabilityDenied {
+            capability: "selected-project".into(),
+            message: "select this paper's main .tex file or its folder through the native file dialog first".into(),
+        });
+    }
+    Ok((root, open_path))
 }
 
 fn validate_folder_name(folder_name: &str) -> AppResult<()> {
@@ -2797,6 +2882,37 @@ mod tests {
     }
 
     #[test]
+    fn application_update_blocks_even_clean_open_papers_and_new_registration() {
+        let (directory, state, _) = registered_fixture("\\section{Saved paper}\n");
+        assert!(!state.window_has_dirty_project("owner-window"));
+        assert!(state.begin_application_update().is_err());
+        state.close_window_sessions("owner-window");
+        state.begin_application_update().unwrap();
+        assert!(state.begin_application_update().is_err());
+        let session = ProjectSession::open_path(directory.path().join("paper")).unwrap();
+        let settings = PaperSettingsV1::new(
+            "main.tex",
+            TemplateId::GenericArticle,
+            DEFAULT_RUNTIME_PROFILE,
+            LatexEngine::PdfLatex,
+        );
+        assert!(
+            state
+                .register(
+                    "new-window",
+                    session,
+                    "New".into(),
+                    settings,
+                    "fixture".into()
+                )
+                .is_err()
+        );
+        assert!(state.contexts.read().is_empty());
+        state.end_application_update();
+        state.begin_application_update().unwrap();
+    }
+
+    #[test]
     fn main_file_must_stay_relative() {
         assert_eq!(
             validate_relative_source_path("sections/method.tex").unwrap(),
@@ -2808,6 +2924,63 @@ mod tests {
         assert!(validate_relative_source_path("..\\outside.tex").is_err());
         assert!(validate_relative_source_path("\\outside.tex").is_err());
         assert!(validate_relative_source_path("main.tex:stream").is_err());
+    }
+
+    #[test]
+    fn selected_main_file_opens_its_paper_without_directory_scope_or_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("Paper with spaces");
+        std::fs::create_dir_all(root.join("sections")).unwrap();
+        let source = b"\\documentclass{article}\n\\begin{document}\n\\input{sections/method}\n\\end{document}\n";
+        let method = b"\\section{Method}\nPreserved bytes.\n";
+        std::fs::write(root.join("paper.tex"), source).unwrap();
+        std::fs::write(root.join("sections/method.tex"), method).unwrap();
+        let selected = root.join("paper.tex").canonicalize().unwrap();
+        let allowed = |path: &Path| path == selected;
+        let (canonical_root, open_path) =
+            selected_project_paths(&root, Some("paper.tex"), allowed).unwrap();
+        assert_eq!(open_path, selected);
+        assert!(!allowed(&canonical_root));
+        let session = ProjectSession::open_path(open_path).unwrap();
+        assert_eq!(session.root(), canonical_root);
+        assert_eq!(session.snapshot().unwrap().files.len(), 2);
+        assert_eq!(std::fs::read(root.join("paper.tex")).unwrap(), source);
+        assert_eq!(
+            std::fs::read(root.join("sections/method.tex")).unwrap(),
+            method
+        );
+        assert!(!root.join("paper-settings.json").exists());
+    }
+
+    #[test]
+    fn selected_main_file_cannot_authorize_siblings_or_an_ancestor_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("paper");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("main.tex"), b"Selected").unwrap();
+        std::fs::write(root.join("other.tex"), b"Not selected").unwrap();
+        let selected = root.join("main.tex").canonicalize().unwrap();
+        let allowed = |path: &Path| path == selected;
+        assert!(matches!(
+            selected_project_paths(&root, Some("other.tex"), allowed),
+            Err(AppError::CapabilityDenied { .. })
+        ));
+        assert!(matches!(
+            selected_project_paths(directory.path(), Some("paper/main.tex"), allowed),
+            Err(AppError::CapabilityDenied { .. })
+        ));
+        assert!(selected_project_paths(&root, Some("../outside.tex"), allowed).is_err());
+        assert!(selected_project_paths(&root, None, allowed).is_err());
+    }
+
+    #[test]
+    fn native_directory_selection_still_opens_a_project() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        assert_eq!(
+            selected_project_paths(&root, None, |path| path == root).unwrap(),
+            (root.clone(), root)
+        );
     }
 
     #[test]

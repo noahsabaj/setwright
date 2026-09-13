@@ -10,15 +10,15 @@ const modes = [
   { id: "split", label: "Split", icon: Columns2 },
 ] as const satisfies ReadonlyArray<{ id: WorkspaceMode; label: string; icon: typeof FilePenLine }>;
 
-export function ModeSwitcher() {
+export function ModeSwitcher({ canWrite = true }: { canWrite?: boolean }) {
   const mode = useWorkspaceStore((state) => state.mode);
   const setMode = useWorkspaceStore((state) => state.setMode);
 
   return (
-    <Tabs selectedKey={mode} onSelectionChange={(key) => setMode(String(key) as WorkspaceMode)}>
+    <Tabs className="workspace-modes" selectedKey={mode} onSelectionChange={(key) => setMode(String(key) as WorkspaceMode)}>
       <TabList className="mode-switcher" aria-label="Workspace view">
         {modes.map(({ id, label, icon: Icon }) => (
-          <Tab className="mode-switcher__button" data-active={mode === id} id={id} key={id}>
+          <Tab className="mode-switcher__button" data-active={mode === id} id={id} key={id} isDisabled={id === "write" && !canWrite}>
             <Icon size={14} strokeWidth={1.9} aria-hidden="true" />
             <span>{label}</span>
           </Tab>

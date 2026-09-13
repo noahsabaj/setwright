@@ -8,13 +8,16 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::os::fd::FromRawFd;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 
 const ERROR_BUFFER_BYTES: usize = 1024;
 const JOB_ID_BYTES: usize = 128;
+const XPC_LAUNCH_TIMEOUT: Duration = Duration::from_secs(10);
+const XPC_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
+const XPC_WAIT_GRACE: Duration = Duration::from_secs(15);
 
 unsafe extern "C" {
     fn sw_xpc_verify_service(
@@ -29,6 +32,7 @@ unsafe extern "C" {
         error: *mut c_char,
         error_length: usize,
     ) -> *mut c_void;
+    fn sw_xpc_cancel(client: *mut c_void);
     fn sw_xpc_disconnect(client: *mut c_void);
     fn sw_xpc_launch(
         client: *mut c_void,
@@ -40,6 +44,7 @@ unsafe extern "C" {
         environment_keys: *const *const c_char,
         environment_values: *const *const c_char,
         environment_count: usize,
+        timeout_ms: u64,
         memory_limit: u64,
         writable_limit: u64,
         process_limit: u32,
@@ -187,7 +192,10 @@ fn launch_xpc(
         ));
     }
 
-    let client = XpcClient::connect(&service.service_name)?;
+    let endpoint = XpcEndpoint {
+        service_name: service.service_name.clone(),
+    };
+    let client = endpoint.connect()?;
     let runtime = path_cstring(&runtime_root)?;
     let stage = path_cstring(&stage_root)?;
     let output = path_cstring(&output_root)?;
@@ -222,29 +230,39 @@ fn launch_xpc(
     let mut root_pid = 0_i32;
     let mut job_id = [0_i8; JOB_ID_BYTES];
     let mut error = [0_i8; ERROR_BUFFER_BYTES];
-    let launched = unsafe {
-        sw_xpc_launch(
-            client.raw(),
-            runtime.as_ptr(),
-            stage.as_ptr(),
-            output.as_ptr(),
-            argument_pointers.as_ptr(),
-            argument_pointers.len(),
-            environment_keys.as_ptr(),
-            environment_values.as_ptr(),
-            environment.len(),
-            spec.limits.memory_bytes,
-            spec.limits.writable_bytes,
-            u32::from(spec.limits.max_child_processes).saturating_add(1),
-            &mut stdout_fd,
-            &mut stderr_fd,
-            &mut root_pid,
-            job_id.as_mut_ptr(),
-            job_id.len(),
-            error.as_mut_ptr(),
-            error.len(),
-        )
-    };
+    let timeout_ms = spec
+        .limits
+        .timeout_seconds
+        .checked_mul(1000)
+        .ok_or_else(|| unavailable("XPC compile timeout overflowed milliseconds"))?;
+    let launched = client.call_with_deadline(
+        XPC_LAUNCH_TIMEOUT,
+        "launch sandboxed XPC compile helper",
+        |raw| unsafe {
+            sw_xpc_launch(
+                raw,
+                runtime.as_ptr(),
+                stage.as_ptr(),
+                output.as_ptr(),
+                argument_pointers.as_ptr(),
+                argument_pointers.len(),
+                environment_keys.as_ptr(),
+                environment_values.as_ptr(),
+                environment.len(),
+                timeout_ms,
+                spec.limits.memory_bytes,
+                spec.limits.writable_bytes,
+                u32::from(spec.limits.max_child_processes).saturating_add(1),
+                &mut stdout_fd,
+                &mut stderr_fd,
+                &mut root_pid,
+                job_id.as_mut_ptr(),
+                job_id.len(),
+                error.as_mut_ptr(),
+                error.len(),
+            )
+        },
+    )?;
     ffi_result(launched, &error, "launch sandboxed XPC compile helper")?;
     if stdout_fd < 0 || stderr_fd < 0 || root_pid <= 0 {
         return Err(unavailable("XPC service returned invalid stream handles"));
@@ -254,9 +272,10 @@ fn launch_xpc(
         .map_err(|_| unavailable("XPC service returned a non-UTF-8 job id"))?;
     let job_id = CString::new(job_id).map_err(|_| unavailable("XPC job id contains NUL"))?;
     let state = Arc::new(XpcJob {
-        client,
+        endpoint,
         job_id,
         root_pid,
+        wall_timeout: spec.limits.timeout(),
         memory_limit: spec.limits.memory_bytes,
         process_limit: u32::from(spec.limits.max_child_processes).saturating_add(1),
         resumed: AtomicBool::new(false),
@@ -280,6 +299,17 @@ fn launch_xpc(
     )
 }
 
+#[derive(Debug, Clone)]
+struct XpcEndpoint {
+    service_name: CString,
+}
+
+impl XpcEndpoint {
+    fn connect(&self) -> AppResult<Arc<XpcClient>> {
+        XpcClient::connect(&self.service_name)
+    }
+}
+
 struct XpcClient {
     raw: usize,
 }
@@ -297,6 +327,45 @@ impl XpcClient {
     fn raw(&self) -> *mut c_void {
         self.raw as *mut c_void
     }
+
+    fn call_with_deadline<T>(
+        self: &Arc<Self>,
+        timeout: Duration,
+        label: &str,
+        operation: impl FnOnce(*mut c_void) -> T,
+    ) -> AppResult<T> {
+        let (finished_tx, finished_rx) = mpsc::sync_channel(1);
+        let timed_out = Arc::new(AtomicBool::new(false));
+        let deadline_timed_out = Arc::clone(&timed_out);
+        let deadline_client = Arc::clone(self);
+        let deadline = thread::Builder::new()
+            .name("setwright-xpc-deadline".into())
+            .spawn(move || {
+                if matches!(
+                    finished_rx.recv_timeout(timeout),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                ) {
+                    deadline_timed_out.store(true, Ordering::Release);
+                    unsafe {
+                        sw_xpc_cancel(deadline_client.raw());
+                    }
+                }
+            })
+            .map_err(|error| unavailable(format!("{label}: start XPC deadline: {error}")))?;
+        let result = operation(self.raw());
+        let _ = finished_tx.send(());
+        deadline
+            .join()
+            .map_err(|_| unavailable(format!("{label}: XPC deadline monitor panicked")))?;
+        if timed_out.load(Ordering::Acquire) {
+            Err(unavailable(format!(
+                "{label}: XPC service did not reply within {} ms",
+                timeout.as_millis()
+            )))
+        } else {
+            Ok(result)
+        }
+    }
 }
 
 impl Drop for XpcClient {
@@ -311,9 +380,10 @@ unsafe impl Send for XpcClient {}
 unsafe impl Sync for XpcClient {}
 
 struct XpcJob {
-    client: Arc<XpcClient>,
+    endpoint: XpcEndpoint,
     job_id: CString,
     root_pid: i32,
+    wall_timeout: Duration,
     memory_limit: u64,
     process_limit: u32,
     resumed: AtomicBool,
@@ -326,31 +396,28 @@ impl XpcJob {
         operation: unsafe extern "C" fn(*mut c_void, *const c_char, *mut c_char, usize) -> c_int,
         label: &str,
     ) -> AppResult<()> {
+        let client = self.endpoint.connect()?;
         let mut error = [0_i8; ERROR_BUFFER_BYTES];
-        let result = unsafe {
-            operation(
-                self.client.raw(),
-                self.job_id.as_ptr(),
-                error.as_mut_ptr(),
-                error.len(),
-            )
-        };
+        let result = client.call_with_deadline(XPC_CONTROL_TIMEOUT, label, |raw| unsafe {
+            operation(raw, self.job_id.as_ptr(), error.as_mut_ptr(), error.len())
+        })?;
         ffi_result(result, &error, label)
     }
 
     fn terminate_with_reason(&self, reason: &str, label: &str) -> AppResult<()> {
         let reason =
             CString::new(reason).map_err(|_| unavailable("XPC termination reason contains NUL"))?;
+        let client = self.endpoint.connect()?;
         let mut error = [0_i8; ERROR_BUFFER_BYTES];
-        let result = unsafe {
+        let result = client.call_with_deadline(XPC_CONTROL_TIMEOUT, label, |raw| unsafe {
             sw_xpc_terminate(
-                self.client.raw(),
+                raw,
                 self.job_id.as_ptr(),
                 reason.as_ptr(),
                 error.as_mut_ptr(),
                 error.len(),
             )
-        };
+        })?;
         ffi_result(result, &error, label)
     }
 }
@@ -447,19 +514,29 @@ struct XpcExitWaiter {
 
 impl SandboxExitWaiter for XpcExitWaiter {
     fn wait(self: Box<Self>) -> AppResult<SandboxExitStatus> {
+        let client = self.state.endpoint.connect()?;
         let mut exit_code = 0_i32;
         let mut error = [0_i8; ERROR_BUFFER_BYTES];
-        let result = unsafe {
-            sw_xpc_wait(
-                self.state.client.raw(),
-                self.state.job_id.as_ptr(),
-                &mut exit_code,
-                error.as_mut_ptr(),
-                error.len(),
-            )
-        };
-        self.state.finished.store(true, Ordering::Release);
+        let wait_timeout = self
+            .state
+            .wall_timeout
+            .checked_add(XPC_WAIT_GRACE)
+            .ok_or_else(|| unavailable("XPC wait timeout overflowed"))?;
+        let result = client.call_with_deadline(
+            wait_timeout,
+            "wait for XPC compiler process",
+            |raw| unsafe {
+                sw_xpc_wait(
+                    raw,
+                    self.state.job_id.as_ptr(),
+                    &mut exit_code,
+                    error.as_mut_ptr(),
+                    error.len(),
+                )
+            },
+        )?;
         ffi_result(result, &error, "wait for XPC compiler process")?;
+        self.state.finished.store(true, Ordering::Release);
         Ok(SandboxExitStatus {
             success: exit_code == 0,
             exit_code: Some(exit_code),
