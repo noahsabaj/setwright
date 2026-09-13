@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { PDFDocumentLoadingTask, PDFDocumentProxy, RenderTask } from "pdfjs-dist";
 import { Check, ChevronLeft, ChevronRight, Download, FileWarning, Maximize2, Minus, Plus, RefreshCw } from "lucide-react";
-import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.min.mjs?url";
 import { useWorkspaceStore } from "../store/workspace-store";
 import { IconButton } from "./IconButton";
 
@@ -50,7 +50,9 @@ export function PreviewPane({
     let disposed = false;
     let loadingTask: PDFDocumentLoadingTask | null = null;
     const loadPdf = async () => {
-      const pdfjs = await import("pdfjs-dist");
+      // Use PDF.js's maintained compatibility build in both realms. Modern
+      // builds require Promise.try, which is absent from Chromium 125.
+      const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
       if (disposed) return;
       pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
       loadingTask = pdfjs.getDocument({ data: pdfBytes.slice() });

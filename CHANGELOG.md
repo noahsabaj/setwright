@@ -2,6 +2,9 @@
 
 ## 0.2.0 — 2026-09-13
 
+- Keep PDF rendering compatible with Chromium 125 using the maintained PDF.js compatibility build.
+- Restore AppContainer file permissions before completing a job, preventing a cleanup race with subsequent jobs.
+
 - Install Setwright as a Windows app with a Start Menu shortcut and uninstaller.
 - Check for signed updates, read release notes in the app, and opt into automatic updates.
 - Open papers in Write mode, with direct LaTeX editing in Source mode.

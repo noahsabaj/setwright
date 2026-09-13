@@ -28,8 +28,8 @@ use windows_sys::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
 use windows_sys::Win32::Security::{
-    ACL, DACL_SECURITY_INFORMATION, FreeSid, PSID, SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES,
-    SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+    ACL, DACL_SECURITY_INFORMATION, FreeSid, NO_INHERITANCE, PSID, SECURITY_ATTRIBUTES,
+    SECURITY_CAPABILITIES,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
@@ -241,6 +241,12 @@ impl ProcessState {
     fn initial_thread(&self) -> HANDLE {
         self.initial_thread as HANDLE
     }
+
+    fn restore_acl_scope(&self) {
+        if let Ok(mut guards) = self.acl_guards.lock() {
+            while guards.pop().is_some() {}
+        }
+    }
 }
 
 impl SandboxProcessControl for ProcessState {
@@ -299,9 +305,15 @@ impl SandboxExitWaiter for WindowsExitWaiter {
         }
         let mut exit_code = 0_u32;
         if unsafe { GetExitCodeProcess(self.state.process(), &mut exit_code) } == 0 {
-            return Err(last_os_error("read AppContainer exit code"));
+            let error = last_os_error("read AppContainer exit code");
+            self.state.finished.store(true, Ordering::Release);
+            self.state.restore_acl_scope();
+            return Err(error);
         }
         self.state.finished.store(true, Ordering::Release);
+        // Restore before reporting completion. The watchdog can hold an Arc
+        // briefly; letting its later Drop restore ACLs would race the next job.
+        self.state.restore_acl_scope();
         Ok(SandboxExitStatus {
             success: exit_code == 0,
             exit_code: Some(exit_code as i32),
@@ -444,7 +456,9 @@ impl ScopedAcl {
         let entry = EXPLICIT_ACCESS_W {
             grfAccessPermissions: permissions,
             grfAccessMode: GRANT_ACCESS,
-            grfInheritance: SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+            // grant_tree applies an ACE to each object. Inheriting it as well
+            // propagates parent restoration into a subsequent job's scope.
+            grfInheritance: NO_INHERITANCE,
             Trustee: trustee,
         };
         let mut granted_dacl: *mut ACL = null_mut();
