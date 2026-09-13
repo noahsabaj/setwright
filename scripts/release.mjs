@@ -8,6 +8,12 @@ const json = (path) => JSON.parse(read(path));
 const semver = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?$/;
 const [command = "check", argument, destination] = process.argv.slice(2);
 
+function localPath(path) {
+  const candidate = resolve(root, path);
+  if (!candidate.startsWith(root)) throw new Error("Release files must stay inside the repository.");
+  return candidate;
+}
+
 function version() {
   const value = json("package.json").version;
   const cargo = read("src-tauri/Cargo.toml").match(/^version = "([^"]+)"/m)?.[1];
@@ -37,15 +43,17 @@ if (command === "prepare") {
   console.log(`Version and changelog verified: ${value}`);
 } else if (command === "notes") {
   const output = notes(version());
-  if (argument) writeFileSync(argument, output + "\n"); else console.log(output);
+  if (argument) writeFileSync(localPath(argument), output + "\n"); else console.log(output);
 } else if (command === "manifest") {
   const value = version();
-  if (!argument || !destination || !existsSync(argument) || !existsSync(`${argument}.sig`)) throw new Error("Usage: manifest SIGNED_INSTALLER OUTPUT_JSON");
+  if (!argument || !destination) throw new Error("Usage: manifest SIGNED_INSTALLER OUTPUT_JSON");
+  const installerPath = localPath(argument), signaturePath = localPath(`${argument}.sig`), outputPath = localPath(destination);
+  if (!existsSync(installerPath) || !existsSync(signaturePath)) throw new Error("Installer and signature must exist.");
   if (basename(argument) !== `Setwright_${value}_x64-setup.exe`) throw new Error("The installer filename must match the current Windows x64 version.");
-  const signature = readFileSync(`${argument}.sig`, "utf8").trim();
+  const signature = readFileSync(signaturePath, "utf8").trim();
   if (!signature) throw new Error("Installer signature is missing.");
   const url = `https://github.com/noahsabaj/setwright/releases/download/v${value}/${encodeURIComponent(basename(argument))}`;
-  writeFileSync(destination, JSON.stringify({ version: value, notes: notes(value), pub_date: new Date().toISOString(), platforms: { "windows-x86_64": { url, signature } } }, null, 2) + "\n");
+  writeFileSync(outputPath, JSON.stringify({ version: value, notes: notes(value), pub_date: new Date().toISOString(), platforms: { "windows-x86_64": { url, signature } } }, null, 2) + "\n");
 } else { throw new Error(`Unknown command: ${command}`); }
 
 function compareVersions(left, right) {

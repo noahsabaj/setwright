@@ -26,6 +26,7 @@ test("version preparation rejects malformed, equal and older versions without ch
   writeFileSync(join(root, "CHANGELOG.md"), "## 0.2.1 — today\n- A fix.\n");
   assert.equal(run("check", "v0.2.1").status, 0);
   assert.notEqual(run("check", "v0.2.0").status, 0);
+  assert.notEqual(run("notes", "../outside-release-notes.md").status, 0);
 });
 
 test("prerelease ordering follows numeric SemVer identifiers", (t) => {
