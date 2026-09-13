@@ -478,16 +478,6 @@ fn ensure_user_namespaces_available() -> AppResult<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn process_limit_preserves_the_compiler_child_budget() {
-        assert_eq!(bubblewrap_process_limit(32), 35);
-    }
-}
-
 fn verify_file_hash(path: &Path, expected: &str, label: &str) -> AppResult<()> {
     let bytes =
         fs::read(path).map_err(|error| unavailable(format!("read pinned {label}: {error}")))?;
@@ -534,5 +524,15 @@ fn kill_child(child: &mut Child, message: &str) -> AppError {
 fn unavailable(message: impl Into<String>) -> AppError {
     AppError::CompileUnavailable {
         message: message.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn process_limit_preserves_the_compiler_child_budget() {
+        assert_eq!(bubblewrap_process_limit(32), 35);
     }
 }
