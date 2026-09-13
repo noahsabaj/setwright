@@ -4,6 +4,7 @@
 
 - Keep PDF rendering compatible with Chromium 125 using the maintained PDF.js compatibility build.
 - Restore AppContainer file permissions before completing a job, preventing a cleanup race with subsequent jobs.
+- Bound macOS compiler-service requests and keep cancellation independent of a pending wait.
 
 - Install Setwright as a Windows app with a Start Menu shortcut and uninstaller.
 - Check for signed updates, read release notes in the app, and opt into automatic updates.

@@ -16,6 +16,11 @@ use std::thread;
 use std::time::Duration;
 use walkdir::WalkDir;
 
+// The pinned bubblewrap topology has two processes outside the compiler tree:
+// its host-side monitor and the PID-namespace init/reaper. The common policy's
+// max_child_processes budget applies only to descendants of the compiler root.
+const BUBBLEWRAP_INFRASTRUCTURE_PROCESSES: u32 = 2;
+
 #[derive(Debug, Clone)]
 pub struct BubblewrapSidecar {
     executable: PathBuf,
@@ -214,7 +219,7 @@ fn launch_bubblewrap(
         output_root,
         writable_limit: spec.limits.writable_bytes,
         memory_limit: spec.limits.memory_bytes,
-        process_limit: u32::from(spec.limits.max_child_processes).saturating_add(1),
+        process_limit: bubblewrap_process_limit(spec.limits.max_child_processes),
     });
     start_resource_watchdog(&control);
     let waiter: Box<dyn SandboxExitWaiter> = Box::new(LinuxExitWaiter {
@@ -366,6 +371,12 @@ fn process_tree(root: i32) -> Option<Vec<i32>> {
     Some(result)
 }
 
+const fn bubblewrap_process_limit(max_child_processes: u16) -> u32 {
+    (max_child_processes as u32)
+        .saturating_add(1)
+        .saturating_add(BUBBLEWRAP_INFRASTRUCTURE_PROCESSES)
+}
+
 fn resident_bytes(processes: &[i32]) -> Option<u64> {
     let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
     if page_size <= 0 {
@@ -465,6 +476,16 @@ fn ensure_user_namespaces_available() -> AppResult<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn process_limit_preserves_the_compiler_child_budget() {
+        assert_eq!(bubblewrap_process_limit(32), 35);
+    }
 }
 
 fn verify_file_hash(path: &Path, expected: &str, label: &str) -> AppResult<()> {
